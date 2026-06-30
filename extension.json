@@ -1,0 +1,9 @@
+{
+  "protocol": {
+    "s5r": "1.0"
+  },
+  "command": [
+    "./astrcode-pr-review-agent",
+    "s5r"
+  ]
+}
