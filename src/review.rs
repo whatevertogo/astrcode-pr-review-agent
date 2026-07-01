@@ -870,7 +870,8 @@ Scope:
 - Return strict JSON only.
 - Do not post GitHub comments.
 - Include every shard file path in `files_reviewed` if you inspected it.
-- Put confirmed problems only in `findings`; do not create `verification` items or "passed" review notes.
+- Put actionable issues in `confirmed_findings` or `advisory_findings`; do not create `verification` items or "passed" review notes.
+- Grade severity by impact, not by bucket. P1/P2 are valid for API contract, reliability, and test risks when they affect merge quality.
 
 Reviewer profile:
 ```markdown
@@ -962,7 +963,8 @@ Scope:
 - Do not repeat findings already present in file pass outputs.
 - Return strict JSON only.
 - Do not post GitHub comments.
-- Put confirmed problems only in `findings`; do not create `verification` items or "passed" review notes.
+- Put actionable issues in `confirmed_findings` or `advisory_findings`; do not create `verification` items or "passed" review notes.
+- Grade severity by impact, not by bucket. P1/P2 are valid for API contract, reliability, and test risks when they affect merge quality.
 
 Repository-level instructions:
 ```markdown
@@ -2635,12 +2637,13 @@ Write the final GitHub PR review report for {repo} PR #{pr_number}: {title}
 
 Rules:
 - Return strict JSON only: {{"report":"...markdown..."}}
-- Write a complete Chinese Markdown report, similar to a human PR reviewer final comment.
+- Write a complete Chinese Markdown report in the old reviewnow style: concrete scope, verification, findings, merge assessment, low-confidence observations, what was done, next steps, and residual risk.
 - Do not include the HTML marker, agent line, review session, trigger, or head SHA; the plugin adds those.
 - Use the four unchanged review angles only: Correctness, Security, Reliability/Performance, Tests/API Contract.
 - Be concrete and grounded in the data below. Do not invent code facts, commands, line numbers, or risks.
-- If inline findings exist, include a `## 发现` section and summarize each confirmed issue with priority, file/line, angle, issue, impact, and fix.
-- If there are summary-only findings or observations, include them under `## 设计提醒` or `## 低置信度观察` instead of pretending nothing was found.
+- If inline findings exist, include a `## 发现` section and summarize each issue with priority, file/line, angle, issue, impact, and fix.
+- If there are summary-only P1/P2 findings, include them under `## 发现` too, clearly marking why they were not inline.
+- If there are P3 summary-only findings or observations, include them under `## 设计提醒` or `## 低置信度观察` instead of pretending nothing was found.
 - If there are no inline findings, explain whether the run found summary-only advisory/observations or truly found no useful risk.
 - Keep `## 验证` useful: mention failed/skipped checks or meaningful validation, not a long list of "passed" boilerplate.
 - Include `## 合并评估`, `## 做了什么`, `## 下一步建议`, and `## 剩余风险`.

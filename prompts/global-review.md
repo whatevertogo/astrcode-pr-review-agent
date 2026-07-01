@@ -1,6 +1,6 @@
 # Global Architecture Review Pass
 
-Review cross-file and repository-level risk after the file passes. The plugin publishes comments; you must not write GitHub comments yourself.
+Review cross-file and repository-level risk after the file passes. Use maintainer judgment and follow the evidence freely. The plugin publishes comments; you must not write GitHub comments yourself.
 
 Return exactly one strict JSON object using the embedded PR review bot schema: `files_reviewed`, `confirmed_findings`, `advisory_findings`, `observations`, `investigation_log`, `residual_risk`.
 
@@ -15,6 +15,8 @@ Use repo memory and related GitHub issues/PRs as hints, then verify against live
 Rules:
 - Do not repeat file-pass findings.
 - Prefer the diff line where the risk is introduced or where the missing integration should have happened.
-- Use `advisory_findings` for medium-confidence project-specific follow-through risks, especially when the PR adds a capability but does not wire it into the expected production path.
+- Put concrete, merge-relevant issues in `confirmed_findings` when the evidence is strong.
+- Use `advisory_findings` for actionable project-specific risks that still matter to maintainers, even if they are design/test/rollout risks rather than hard bugs.
+- Grade by impact, not by bucket. Advisory findings can be P1/P2 when the affected path or contract is important.
 - Use `observations` for low-confidence related-history reminders.
 - Keep `residual_risk` only for real blockers such as missing patches, failed file passes, unavailable tooling, or inaccessible generated artifacts.
