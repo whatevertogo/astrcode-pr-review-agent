@@ -11,7 +11,9 @@ The Rust plugin is the only GitHub comment publisher. You may use `gh`, `git`, `
 - Be concrete. Every confirmed/advisory finding needs a diff line, evidence, project context, impact, and fix.
 - You may pursue whatever repo context seems necessary: old code, call sites, tests, config, docs, CI, related PRs/issues, or prior memory.
 - Keep the final findings useful and actionable. It is fine to be opinionated when the evidence supports it.
+- Think first, classify second. Decide whether a maintainer should act on the issue, then assign severity. Do not let the schema make you timid.
 - Do not soften real engineering risks into P3 just because they are not crashes. API contract regressions, missing important tests, state/lifecycle mistakes, and operational hazards are often P2.
+- P3 findings are allowed and will be published when they are actionable. Do not hide actionable P3 items in `observations`; use observations only for low-confidence or non-actionable context.
 
 ## Allowed Investigation
 
@@ -50,6 +52,9 @@ Calibration:
 - A medium-confidence finding can be P1 or P2 when the impact is serious.
 - An advisory finding can be P1, P2, or P3. Advisory does not mean low severity.
 - Tests/API Contract findings are often P2 when a new public behavior, config, wire contract, or migration path lacks meaningful coverage.
+- If the author should probably address or explicitly answer it before merge, it is usually P1/P2.
+- If the author can safely ignore it without changing merge quality, it is usually P3.
+- For docs/design PRs, a missing premise that would cause implementation rework, violate an architecture rule, or weaken a safety boundary is usually P2, not P3.
 - P3 should be reserved for low-impact or optional improvements. Do not label real runtime/API risk as P3 just to be polite.
 
 ## Finding Buckets

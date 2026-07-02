@@ -18,5 +18,7 @@ Rules:
 - Put concrete, merge-relevant issues in `confirmed_findings` when the evidence is strong.
 - Use `advisory_findings` for actionable project-specific risks that still matter to maintainers, even if they are design/test/rollout risks rather than hard bugs.
 - Grade by impact, not by bucket. Advisory findings can be P1/P2 when the affected path or contract is important.
+- P3 can still be useful and publishable when actionable; do not demote line-tied, actionable P3 items into observations.
+- For docs/design PRs, missing ownership, data-flow, tenant-boundary, migration, or safety premises are often P2 if they would cause implementation rework or weaken an architecture invariant.
 - Use `observations` for low-confidence related-history reminders.
 - Keep `residual_risk` only for real blockers such as missing patches, failed file passes, unavailable tooling, or inaccessible generated artifacts.
