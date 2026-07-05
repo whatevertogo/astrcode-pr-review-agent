@@ -473,8 +473,10 @@ mod tests {
 
     #[test]
     fn file_manifest_classifies_docs_generated_no_patch_and_oversized() {
-        let mut config = Config::default();
-        config.review_shard_max_bytes = 300;
+        let config = Config {
+            review_shard_max_bytes: 300,
+            ..Config::default()
+        };
         let files = vec![
             PullRequestApiFile {
                 filename: "docs/guide.md".into(),
@@ -528,9 +530,11 @@ mod tests {
 
     #[test]
     fn shard_planner_covers_reviewable_files() {
-        let mut config = Config::default();
-        config.max_files_per_shard = 1;
-        config.review_shard_max_bytes = 10_000;
+        let config = Config {
+            max_files_per_shard: 1,
+            review_shard_max_bytes: 10_000,
+            ..Config::default()
+        };
         let mut context = test_review_context();
         context.files.push(ReviewFileContext {
             path: "src/other.rs".into(),
@@ -571,8 +575,10 @@ mod tests {
 
     #[test]
     fn finding_validation_filters_invalid_duplicate_and_overflow() {
-        let mut config = Config::default();
-        config.max_inline_comments = 1;
+        let config = Config {
+            max_inline_comments: 1,
+            ..Config::default()
+        };
         let context = test_review_context();
         let output = ReviewBotOutput {
             confirmed_findings: vec![
@@ -651,16 +657,17 @@ mod tests {
             }),
             debug_dir: None,
         };
-        let body = structured_review_summary_body(
-            &config,
-            &trigger,
-            "s1",
-            &validated,
-            1,
-            0,
-            Some("P1 Persist storage before returning"),
-            None,
-        );
+        let summary = StructuredReviewSummary {
+            config: &config,
+            trigger: &trigger,
+            session_id: "s1",
+            validated: &validated,
+            inline_comments_posted: 1,
+            unplaced_count: 0,
+            highest_risk: Some("P1 Persist storage before returning"),
+            publish_error: None,
+        };
+        let body = structured_review_summary_body(&summary);
         let payload = pull_review_payload(&config, &trigger, &body, &[finding]);
         let comments = payload
             .get("comments")

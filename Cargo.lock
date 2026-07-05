@@ -19,8 +19,8 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "astrcode-core"
-version = "0.3.4"
-source = "git+https://github.com/whatevertogo/astrcodey#f6321e155a3612d929fa031c1cf48c1925a9f0a8"
+version = "0.3.8"
+source = "git+https://github.com/whatevertogo/astrcodey#9912423ce2f14af6acc0bd25109703178b678744"
 dependencies = [
  "async-trait",
  "chrono",
@@ -35,8 +35,8 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-sdk"
-version = "0.3.4"
-source = "git+https://github.com/whatevertogo/astrcodey#f6321e155a3612d929fa031c1cf48c1925a9f0a8"
+version = "0.3.8"
+source = "git+https://github.com/whatevertogo/astrcodey#9912423ce2f14af6acc0bd25109703178b678744"
 dependencies = [
  "astrcode-core",
  "astrcode-protocol",
@@ -69,8 +69,8 @@ dependencies = [
 
 [[package]]
 name = "astrcode-protocol"
-version = "0.3.4"
-source = "git+https://github.com/whatevertogo/astrcodey#f6321e155a3612d929fa031c1cf48c1925a9f0a8"
+version = "0.3.8"
+source = "git+https://github.com/whatevertogo/astrcodey#9912423ce2f14af6acc0bd25109703178b678744"
 dependencies = [
  "astrcode-core",
  "serde",
@@ -80,8 +80,8 @@ dependencies = [
 
 [[package]]
 name = "astrcode-support"
-version = "0.3.4"
-source = "git+https://github.com/whatevertogo/astrcodey#f6321e155a3612d929fa031c1cf48c1925a9f0a8"
+version = "0.3.8"
+source = "git+https://github.com/whatevertogo/astrcodey#9912423ce2f14af6acc0bd25109703178b678744"
 dependencies = [
  "astrcode-core",
  "dirs",
@@ -397,9 +397,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libredox"
-version = "0.1.17"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
+checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "libc",
 ]

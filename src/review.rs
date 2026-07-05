@@ -25,6 +25,8 @@ struct ReviewRecord {
     created_at: u64,
 }
 
+type FindingValidationResult<T> = std::result::Result<T, Box<UnplacedFinding>>;
+
 fn default_trigger_kind() -> String {
     "mention_comment".into()
 }
@@ -447,16 +449,15 @@ async fn run_coverage_first_review(
     }
 
     for shard in shards.iter().take(max_file_passes) {
-        let prompt = file_review_prompt(
+        let prompt_context = PassPromptContext {
             config,
             trigger,
             worktree,
             memory,
-            memory_paths,
-            shard,
             context,
-            &deterministic_checks,
-        );
+            deterministic_checks: &deterministic_checks,
+        };
+        let prompt = file_review_prompt(&prompt_context, memory_paths, shard);
         let label = format!("file-pass-{:03}", shard.index + 1);
         match submit_json_pass(config, run_info, session_id, &prompt, debug_dir.as_deref(), &label)
             .await
@@ -518,16 +519,15 @@ async fn run_coverage_first_review(
     }
 
     if outputs.len() + 1 < max_passes {
-        let prompt = global_review_prompt(
+        let prompt_context = PassPromptContext {
             config,
             trigger,
             worktree,
             memory,
             context,
-            &coverage,
-            &outputs,
-            &deterministic_checks,
-        );
+            deterministic_checks: &deterministic_checks,
+        };
+        let prompt = global_review_prompt(&prompt_context, &coverage, &outputs);
         match submit_json_pass(
             config,
             run_info,
@@ -822,15 +822,19 @@ Plugin-collected PR context:
     )
 }
 
+struct PassPromptContext<'a> {
+    config: &'a Config,
+    trigger: &'a ReviewTrigger,
+    worktree: &'a Path,
+    memory: &'a str,
+    context: &'a ReviewContext,
+    deterministic_checks: &'a [VerificationItem],
+}
+
 fn file_review_prompt(
-    config: &Config,
-    trigger: &ReviewTrigger,
-    worktree: &Path,
-    memory: &str,
+    prompt: &PassPromptContext<'_>,
     memory_paths: &PromptMemoryPaths,
     shard: &ReviewShard,
-    context: &ReviewContext,
-    deterministic_checks: &[VerificationItem],
 ) -> String {
     let shard_text = shard
         .files
@@ -907,44 +911,39 @@ Known non-inline-commentable files:
 ```text
 {non_commentable}
 ```
-"#,
+        "#,
         AGENT_LINE = AGENT_LINE,
         pass = shard.index + 1,
-        repo = trigger.repo,
-        pr_number = trigger.pr.number,
+        repo = prompt.trigger.repo,
+        pr_number = prompt.trigger.pr.number,
         instructions = FILE_REVIEW_PROMPT.trim(),
         reviewer_profile = reviewer_profile_for_shard(shard),
-        repo_instructions = instruction_context_for_shard(config, worktree, shard)
+        repo_instructions = instruction_context_for_shard(prompt.config, prompt.worktree, shard)
             .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
-        deterministic_checks = format_verification_items(deterministic_checks),
-        worktree = worktree.display(),
-        sha = trigger.pr.head_ref_oid,
+        deterministic_checks = format_verification_items(prompt.deterministic_checks),
+        worktree = prompt.worktree.display(),
+        sha = prompt.trigger.pr.head_ref_oid,
         shard_bytes = shard.bytes,
-        memory = if memory.trim().is_empty() {
+        memory = if prompt.memory.trim().is_empty() {
             "No prior memory for this PR."
         } else {
-            memory
+            prompt.memory
         },
         pr_memory_path = memory_paths.pr_memory.display(),
         repo_index_path = memory_paths.repo_index.display(),
         shard_text = shard_text,
-        non_commentable = if context.non_commentable_files.is_empty() {
+        non_commentable = if prompt.context.non_commentable_files.is_empty() {
             "None".into()
         } else {
-            context.non_commentable_files.join("\n")
+            prompt.context.non_commentable_files.join("\n")
         },
     )
 }
 
 fn global_review_prompt(
-    config: &Config,
-    trigger: &ReviewTrigger,
-    worktree: &Path,
-    memory: &str,
-    context: &ReviewContext,
+    prompt: &PassPromptContext<'_>,
     coverage: &ReviewCoverage,
     outputs: &[ReviewBotOutput],
-    deterministic_checks: &[VerificationItem],
 ) -> String {
     format!(
         r#"{AGENT_LINE}
@@ -996,32 +995,33 @@ Full PR context summary:
 ```text
 {context}
 ```
-"#,
+        "#,
         AGENT_LINE = AGENT_LINE,
-        repo = trigger.repo,
-        pr_number = trigger.pr.number,
+        repo = prompt.trigger.repo,
+        pr_number = prompt.trigger.pr.number,
         instructions = GLOBAL_REVIEW_PROMPT.trim(),
         repo_instructions = instruction_context_for_paths(
-            config,
-            worktree,
-            &context
+            prompt.config,
+            prompt.worktree,
+            &prompt
+                .context
                 .files
                 .iter()
                 .map(|file| file.path.clone())
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
-        deterministic_checks = format_verification_items(deterministic_checks),
-        worktree = worktree.display(),
-        sha = trigger.pr.head_ref_oid,
+        deterministic_checks = format_verification_items(prompt.deterministic_checks),
+        worktree = prompt.worktree.display(),
+        sha = prompt.trigger.pr.head_ref_oid,
         coverage = coverage.summary_lines(),
         outputs = serde_json::to_string_pretty(outputs).unwrap_or_else(|_| "[]".into()),
-        memory = if memory.trim().is_empty() {
+        memory = if prompt.memory.trim().is_empty() {
             "No prior memory for this PR."
         } else {
-            memory
+            prompt.memory
         },
-        context = short_context_for_global_pass(context),
+        context = short_context_for_global_pass(prompt.context),
     )
 }
 
@@ -1627,11 +1627,10 @@ fn asks_for_review(text: &str) -> bool {
 fn trigger_instruction(trigger: &ReviewTrigger) -> String {
     match trigger.comment() {
         Some(comment) => comment.body.as_deref().unwrap_or("").to_owned(),
-        None => format!(
-            "这是新 PR 首次发现自动 review，请按插件内置 PR review bot \
+        None => "这是新 PR 首次发现自动 review，请按插件内置 PR review bot \
              规范做一次代码审查。请聚焦当前 PR 相对 base branch 的 \
              diff，并输出插件可校验和发布的结构化 findings。"
-        ),
+            .to_string(),
     }
 }
 
@@ -3047,19 +3046,10 @@ fn validate_review_output(
                         summary_findings.push(finding);
                     }
                 } else {
-                    unplaced.push(unplaced_from_finding(
-                        finding.priority,
-                        finding.kind.as_str().into(),
-                        finding.confidence,
-                        finding.title,
-                        Some(finding.path),
-                        Some(finding.side.as_github().into()),
-                        Some(finding.line),
-                        "duplicate finding".into(),
-                    ));
+                    unplaced.push(unplaced_from_validated(finding, "duplicate finding".into()));
                 }
             },
-            Err(unplaced_finding) => unplaced.push(unplaced_finding),
+            Err(unplaced_finding) => unplaced.push(*unplaced_finding),
         }
     }
 
@@ -3078,14 +3068,8 @@ fn validate_review_output(
         valid.split_off(max_inline)
     };
     for finding in overflow {
-        unplaced.push(unplaced_from_finding(
-            finding.priority,
-            finding.kind.as_str().into(),
-            finding.confidence,
-            finding.title,
-            Some(finding.path),
-            Some(finding.side.as_github().into()),
-            Some(finding.line),
+        unplaced.push(unplaced_from_validated(
+            finding,
             format!("exceeds max_inline_comments={max_inline}"),
         ));
     }
@@ -3120,34 +3104,34 @@ fn validate_finding(
     kind: FindingKind,
     index: usize,
     context: &ReviewContext,
-) -> std::result::Result<ValidatedFinding, UnplacedFinding> {
+) -> FindingValidationResult<ValidatedFinding> {
     let priority = required_field(&finding.severity, "severity", finding)?;
     let priority = normalize_priority(&priority).ok_or_else(|| {
-        unplaced_from_raw(
+        Box::new(unplaced_from_raw(
             finding,
             format!("invalid severity `{priority}`; expected P0, P1, P2, or P3"),
-        )
+        ))
     })?;
     let confidence = required_field(&finding.confidence, "confidence", finding)?;
     let confidence = normalize_confidence(&confidence).ok_or_else(|| {
-        unplaced_from_raw(
+        Box::new(unplaced_from_raw(
             finding,
             format!("invalid confidence `{confidence}`; expected high, medium, or low"),
-        )
+        ))
     })?;
     let category = required_field(&finding.category, "category", finding)?;
     let path = required_field(&finding.path, "path", finding)?;
     let side_raw = required_field(&finding.side, "side", finding)?;
     let side = CommentSide::parse(&side_raw).ok_or_else(|| {
-        unplaced_from_raw(
+        Box::new(unplaced_from_raw(
             finding,
             format!("invalid side `{side_raw}`; expected RIGHT or LEFT"),
-        )
+        ))
     })?;
     let line = finding
         .line
         .filter(|line| *line > 0)
-        .ok_or_else(|| unplaced_from_raw(finding, "missing or invalid line".into()))?;
+        .ok_or_else(|| Box::new(unplaced_from_raw(finding, "missing or invalid line".into())))?;
     let title = required_field(&finding.title, "title", finding)?;
     let issue = required_field(&finding.issue, "issue", finding)?;
     let evidence = required_field(&finding.evidence, "evidence", finding)?;
@@ -3164,14 +3148,14 @@ fn validate_finding(
     } else if let Some(fallback) = nearest_commentable_line(context, &path, line) {
         (fallback.side, fallback.line)
     } else {
-        return Err(unplaced_from_raw(
+        return Err(Box::new(unplaced_from_raw(
             finding,
             format!(
                 "{} {} is not a commentable PR diff line",
                 side.as_github(),
                 line
             ),
-        ));
+        )));
     };
     Ok(ValidatedFinding {
         priority,
@@ -3209,13 +3193,13 @@ fn required_field(
     value: &Option<String>,
     name: &str,
     finding: &ReviewFinding,
-) -> std::result::Result<String, UnplacedFinding> {
+) -> FindingValidationResult<String> {
     value
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| unplaced_from_raw(finding, format!("missing {name}")))
+        .ok_or_else(|| Box::new(unplaced_from_raw(finding, format!("missing {name}"))))
 }
 
 fn normalize_priority(value: &str) -> Option<String> {
@@ -3289,24 +3273,17 @@ fn unplaced_from_raw(finding: &ReviewFinding, reason: String) -> UnplacedFinding
     }
 }
 
-fn unplaced_from_finding(
-    priority: String,
-    kind: String,
-    confidence: String,
-    title: String,
-    path: Option<String>,
-    side: Option<String>,
-    line: Option<u64>,
-    reason: String,
-) -> UnplacedFinding {
+fn unplaced_from_validated(finding: ValidatedFinding, reason: String) -> UnplacedFinding {
+    let kind = finding.kind.as_str().to_owned();
+    let side = finding.side.as_github().to_owned();
     UnplacedFinding {
-        priority,
+        priority: finding.priority,
         kind,
-        confidence,
-        title,
-        path,
-        side,
-        line,
+        confidence: finding.confidence,
+        title: finding.title,
+        path: Some(finding.path),
+        side: Some(side),
+        line: Some(finding.line),
         reason,
     }
 }
@@ -3356,16 +3333,7 @@ fn publish_structured_review(
                 let error_text = format!("GitHub rejected inline review payload: {error:#}");
                 publish_error = Some(error_text.clone());
                 fallback_unplaced.extend(inline_findings.drain(..).map(|finding| {
-                    unplaced_from_finding(
-                        finding.priority,
-                        finding.kind.as_str().into(),
-                        finding.confidence,
-                        finding.title,
-                        Some(finding.path),
-                        Some(finding.side.as_github().into()),
-                        Some(finding.line),
-                        error_text.clone(),
-                    )
+                    unplaced_from_validated(finding, error_text.clone())
                 }));
                 inline_comments_posted = 0;
             },
@@ -3384,16 +3352,17 @@ fn publish_structured_review(
         coverage: validated.coverage.clone(),
         debug_dir: validated.debug_dir.clone(),
     };
-    let summary_body = structured_review_summary_body(
+    let summary_context = StructuredReviewSummary {
         config,
         trigger,
         session_id,
-        &summary_validated,
+        validated: &summary_validated,
         inline_comments_posted,
-        fallback_unplaced.len(),
-        highest_risk.as_deref(),
-        publish_error.as_deref(),
-    );
+        unplaced_count: fallback_unplaced.len(),
+        highest_risk: highest_risk.as_deref(),
+        publish_error: publish_error.as_deref(),
+    };
+    let summary_body = structured_review_summary_body(&summary_context);
     write_debug_artifact(
         validated.debug_dir.as_deref(),
         "publish-result.json",
@@ -3436,14 +3405,8 @@ fn suppress_repeated_findings(
         let fingerprint = finding_fingerprint(&finding);
         match memory.posted_findings.get(&fingerprint) {
             Some(previous) if previous.status != "superseded" && previous.status != "resolved" => {
-                validated.unplaced_findings.push(unplaced_from_finding(
-                    finding.priority,
-                    finding.kind.as_str().into(),
-                    finding.confidence,
-                    finding.title,
-                    Some(finding.path),
-                    Some(finding.side.as_github().into()),
-                    Some(finding.line),
+                validated.unplaced_findings.push(unplaced_from_validated(
+                    finding,
                     "already posted for this PR in a previous review run".into(),
                 ));
             },
@@ -3535,16 +3498,7 @@ fn apply_severity_gate(
             } else {
                 format!("P3 inline limit {p3_limit} was reached")
             };
-            fallback_unplaced.push(unplaced_from_finding(
-                finding.priority,
-                finding.kind.as_str().into(),
-                finding.confidence,
-                finding.title,
-                Some(finding.path),
-                Some(finding.side.as_github().into()),
-                Some(finding.line),
-                reason,
-            ));
+            fallback_unplaced.push(unplaced_from_validated(finding, reason));
         }
     }
     *inline_findings = kept;
@@ -3674,24 +3628,27 @@ Fix: {fix}
     )
 }
 
-fn structured_review_summary_body(
-    config: &Config,
-    trigger: &ReviewTrigger,
-    session_id: &str,
-    validated: &ValidatedReview,
+struct StructuredReviewSummary<'a> {
+    config: &'a Config,
+    trigger: &'a ReviewTrigger,
+    session_id: &'a str,
+    validated: &'a ValidatedReview,
     inline_comments_posted: usize,
     unplaced_count: usize,
-    highest_risk: Option<&str>,
-    publish_error: Option<&str>,
-) -> String {
-    let trigger_line = match trigger.comment() {
+    highest_risk: Option<&'a str>,
+    publish_error: Option<&'a str>,
+}
+
+fn structured_review_summary_body(summary: &StructuredReviewSummary<'_>) -> String {
+    let trigger_line = match summary.trigger.comment() {
         Some(comment) => format!("Trigger comment: `{}`", comment.id),
         None => "Trigger: new PR auto review".into(),
     };
-    let unplaced = if validated.unplaced_findings.is_empty() {
+    let unplaced = if summary.validated.unplaced_findings.is_empty() {
         "None".into()
     } else {
-        validated
+        summary
+            .validated
             .unplaced_findings
             .iter()
             .take(8)
@@ -3709,13 +3666,14 @@ fn structured_review_summary_body(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let verification = verification_summary(&validated.verification);
-    let mut residual = validated
+    let verification = verification_summary(&summary.validated.verification);
+    let mut residual = summary
+        .validated
         .residual_risk
         .iter()
         .map(|risk| format!("- {risk}"))
         .collect::<Vec<_>>();
-    if let Some(error) = publish_error {
+    if let Some(error) = summary.publish_error {
         residual.push(format!("- {error}"));
     }
     let residual = if residual.is_empty() {
@@ -3723,12 +3681,13 @@ fn structured_review_summary_body(
     } else {
         residual.join("\n")
     };
-    let summary = validated
+    let body_summary = summary
+        .validated
         .summary
         .as_deref()
-        .filter(|summary| !summary.trim().is_empty())
+        .filter(|body_summary| !body_summary.trim().is_empty())
         .unwrap_or("Structured PR review completed.");
-    let coverage_summary = coverage_summary_for_comment(validated.coverage.as_ref());
+    let coverage_summary = coverage_summary_for_comment(summary.validated.coverage.as_ref());
     format!(
         r#"{marker}
 {AGENT_LINE}
@@ -3756,15 +3715,15 @@ Head SHA: `{sha}`
 ## Residual Risk
 {residual}
 "#,
-        marker = config.comment_marker,
+        marker = summary.config.comment_marker,
         AGENT_LINE = AGENT_LINE,
-        session_id = session_id,
+        session_id = summary.session_id,
         trigger_line = trigger_line,
-        sha = trigger.pr.head_ref_oid,
-        summary = summary,
-        inline_comments_posted = inline_comments_posted,
-        highest_risk = highest_risk.unwrap_or("None"),
-        unplaced_count = unplaced_count,
+        sha = summary.trigger.pr.head_ref_oid,
+        summary = body_summary,
+        inline_comments_posted = summary.inline_comments_posted,
+        highest_risk = summary.highest_risk.unwrap_or("None"),
+        unplaced_count = summary.unplaced_count,
         coverage_summary = coverage_summary,
         unplaced = unplaced,
         verification = verification,
@@ -3975,8 +3934,7 @@ fn latest_assistant_text(snapshot: &Value) -> Option<String> {
         .iter()
         .filter(|block| block.get("kind").and_then(Value::as_str) == Some("assistant"))
         .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
-        .last()
+        .rfind(|text| !text.trim().is_empty())
         .map(|text| text.trim().to_owned())
 }
 

@@ -129,6 +129,7 @@ fn enqueue_webhook_payload(
     let lock_path = agent_dir()?.join("run.lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("open lock {}", lock_path.display()))?;
@@ -507,7 +508,7 @@ fn verify_webhook_signature(secret: &str, body: &[u8], signature: &str) -> bool 
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         anyhow::bail!("hex input has odd length");
     }
     let mut output = Vec::with_capacity(input.len() / 2);

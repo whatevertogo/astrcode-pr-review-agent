@@ -3,6 +3,7 @@ pub async fn poll_once(config: &Config) -> Result<()> {
     let lock_path = agent_dir()?.join("run.lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("open lock {}", lock_path.display()))?;
