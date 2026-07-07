@@ -20,6 +20,7 @@ use wait_timeout::ChildExt;
 include!("types.rs");
 include!("webhook.rs");
 include!("poller.rs");
+include!("staging.rs");
 include!("review.rs");
 include!("status.rs");
 
@@ -307,7 +308,8 @@ mod tests {
         assert!(prompt.contains("src/storage.rs"));
         assert!(prompt.contains("Do exactly what the trigger comment asks for."));
         assert!(prompt.contains("tagged Markdown findings"));
-        assert!(prompt.contains("Embedded PR Review Bot Instructions"));
+        assert!(prompt.contains("内置 PR 审查规范"));
+        assert!(prompt.contains("Few-Shot"));
         assert!(prompt.contains("Correctness"));
         assert!(prompt.contains("Security"));
         assert!(prompt.contains("Reliability/Performance"));
@@ -342,7 +344,7 @@ mod tests {
         let paths = memory_paths(&config, &trigger.repo, trigger.pr.number);
         let prompt = review_prompt(&trigger, tmp.path(), "", &paths, true, None);
         assert!(prompt.contains("Do not force a code review"));
-        assert!(!prompt.contains("Embedded PR Review Bot Instructions"));
+        assert!(prompt.contains("本 trigger 不是 review 任务"));
     }
 
     #[test]
@@ -358,7 +360,8 @@ mod tests {
         assert!(prompt.contains("Trigger type: new_pull_request"));
         assert!(prompt.contains("这是新 PR 首次发现自动 review"));
         assert!(prompt.contains("tagged Markdown findings"));
-        assert!(prompt.contains("Embedded PR Review Bot Instructions"));
+        assert!(prompt.contains("内置 PR 审查规范"));
+        assert!(prompt.contains("Few-Shot"));
         assert!(prompt.contains("Plugin-collected GitHub PR context"));
         assert!(prompt.contains("<finding"));
         assert!(!prompt.contains("gh api repos/{repo}/pulls/{pr}/comments"));
@@ -381,13 +384,13 @@ mod tests {
             &[],
         );
 
-        assert!(prompt.contains("PR Orientation Pass"));
+        assert!(prompt.contains("PR 定向分析 Pass"));
         assert!(prompt.contains("Repository PR/Issue relation reminders"));
         assert!(prompt.contains("PR #620 affects storage"));
         assert!(prompt.contains("Plugin-collected PR context"));
         assert!(prompt.contains("src/storage.rs"));
         assert!(!prompt.contains("GitHub command audit"));
-        assert!(prompt.contains("embedded tagged protocol"));
+        assert!(prompt.contains("内置标签协议"));
     }
 
     #[test]
@@ -550,6 +553,14 @@ One concrete finding and one repo-history reminder.
         assert_eq!(
             parsed.summary.as_deref(),
             Some("One concrete finding and one repo-history reminder.")
+        );
+    }
+
+    #[test]
+    fn staged_review_path_component_is_filesystem_safe() {
+        assert_eq!(
+            sanitize_path_component("VitaDynamics/Vvbot#624:4816550420"),
+            "VitaDynamics_Vvbot_624_4816550420"
         );
     }
 

@@ -1,6 +1,7 @@
 pub const AGENT_LINE: &str = "我是 whatevertogo 的替身。";
 pub const DEFAULT_MARKER: &str = "<!-- astrcode-auto-review -->";
 const PR_REVIEW_BOT_PROMPT: &str = include_str!("../prompts/pr-review-bot.md");
+const PR_REVIEW_FEW_SHOTS_PROMPT: &str = include_str!("../prompts/few-shots.md");
 const ORIENTATION_REVIEW_PROMPT: &str = include_str!("../prompts/orientation-review.md");
 const FILE_REVIEW_PROMPT: &str = include_str!("../prompts/file-review.md");
 const GLOBAL_REVIEW_PROMPT: &str = include_str!("../prompts/global-review.md");

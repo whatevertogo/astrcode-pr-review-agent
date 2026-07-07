@@ -416,6 +416,23 @@ async fn run_coverage_first_review(
         "deterministic-checks.json",
         &serde_json::to_string_pretty(&deterministic_checks).unwrap_or_default(),
     );
+    let mut staging = match StagedReviewRun::load(trigger) {
+        Ok(run) => {
+            write_debug_artifact(
+                debug_dir.as_deref(),
+                "staged-findings-path.txt",
+                &run.path.display().to_string(),
+            );
+            Some(run)
+        },
+        Err(error) => {
+            eprintln!(
+                "failed to initialize staged review outputs for {}#{}: {error:#}",
+                trigger.repo, trigger.pr.number
+            );
+            None
+        },
+    };
     let max_passes = config.max_review_passes_per_pr.max(1);
     let reserved_passes = 2usize.min(max_passes.saturating_sub(1));
     let max_file_passes = max_passes.saturating_sub(reserved_passes).max(1);
@@ -429,12 +446,13 @@ async fn run_coverage_first_review(
             context,
             &deterministic_checks,
         );
-        match submit_json_pass(
+        match submit_review_pass(
             config,
             run_info,
             session_id,
             &prompt,
             debug_dir.as_deref(),
+            staging.as_mut(),
             "orientation",
         )
         .await
@@ -459,8 +477,16 @@ async fn run_coverage_first_review(
         };
         let prompt = file_review_prompt(&prompt_context, memory_paths, shard);
         let label = format!("file-pass-{:03}", shard.index + 1);
-        match submit_json_pass(config, run_info, session_id, &prompt, debug_dir.as_deref(), &label)
-            .await
+        match submit_review_pass(
+            config,
+            run_info,
+            session_id,
+            &prompt,
+            debug_dir.as_deref(),
+            staging.as_mut(),
+            &label,
+        )
+        .await
         {
             Ok(output) => {
                 let reviewed = output
@@ -528,12 +554,13 @@ async fn run_coverage_first_review(
             deterministic_checks: &deterministic_checks,
         };
         let prompt = global_review_prompt(&prompt_context, &coverage, &outputs);
-        match submit_json_pass(
+        match submit_review_pass(
             config,
             run_info,
             session_id,
             &prompt,
             debug_dir.as_deref(),
+            staging.as_mut(),
             "global-pass",
         )
         .await
@@ -571,14 +598,25 @@ async fn run_coverage_first_review(
     Ok(validated)
 }
 
-async fn submit_json_pass(
+async fn submit_review_pass(
     config: &Config,
     run_info: &RunInfo,
     session_id: &str,
     prompt: &str,
     debug_dir: Option<&Path>,
+    mut staging: Option<&mut StagedReviewRun>,
     label: &str,
 ) -> Result<ReviewBotOutput> {
+    if let Some(staging) = staging.as_deref_mut() {
+        if let Some(output) = staging.output(label) {
+            write_debug_artifact(
+                debug_dir,
+                &format!("{label}-response.json"),
+                &serde_json::to_string_pretty(&output).unwrap_or_default(),
+            );
+            return Ok(output);
+        }
+    }
     write_debug_artifact(debug_dir, &format!("{label}-prompt.md"), prompt);
     let review = submit_prompt_and_wait(
         run_info,
@@ -594,6 +632,9 @@ async fn submit_json_pass(
         &format!("{label}-response.json"),
         &serde_json::to_string_pretty(&output).unwrap_or_default(),
     );
+    if let Some(staging) = staging.as_deref_mut() {
+        staging.append(label, &output)?;
+    }
     Ok(output)
 }
 
@@ -758,6 +799,16 @@ Use this instruction file:
 {instructions}
 ```
 
+Shared review protocol:
+```markdown
+{protocol}
+```
+
+Few-shot examples:
+```markdown
+{few_shots}
+```
+
 Scope:
 - Worktree: `{worktree}`
 - Base branch: `{base}`
@@ -802,6 +853,8 @@ Plugin-collected PR context:
         base = trigger.pr.base_ref_name,
         sha = trigger.pr.head_ref_oid,
         instructions = ORIENTATION_REVIEW_PROMPT.trim(),
+        protocol = PR_REVIEW_BOT_PROMPT.trim(),
+        few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         repo_instructions = instruction_context_for_paths(
             config,
             worktree,
@@ -867,6 +920,16 @@ Use this instruction file:
 {instructions}
 ```
 
+Shared review protocol:
+```markdown
+{protocol}
+```
+
+Few-shot examples:
+```markdown
+{few_shots}
+```
+
 Scope:
 - Worktree: `{worktree}`
 - Head SHA: `{sha}`
@@ -919,6 +982,8 @@ Known non-inline-commentable files:
         repo = prompt.trigger.repo,
         pr_number = prompt.trigger.pr.number,
         instructions = FILE_REVIEW_PROMPT.trim(),
+        protocol = PR_REVIEW_BOT_PROMPT.trim(),
+        few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         reviewer_profile = reviewer_profile_for_shard(shard),
         repo_instructions = instruction_context_for_shard(prompt.config, prompt.worktree, shard)
             .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
@@ -955,6 +1020,16 @@ You are running the global risk pass for {repo} PR #{pr_number}.
 Use this instruction file:
 ```markdown
 {instructions}
+```
+
+Shared review protocol:
+```markdown
+{protocol}
+```
+
+Few-shot examples:
+```markdown
+{few_shots}
 ```
 
 Scope:
@@ -1003,6 +1078,8 @@ Full PR context summary:
         repo = prompt.trigger.repo,
         pr_number = prompt.trigger.pr.number,
         instructions = GLOBAL_REVIEW_PROMPT.trim(),
+        protocol = PR_REVIEW_BOT_PROMPT.trim(),
+        few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         repo_instructions = instruction_context_for_paths(
             prompt.config,
             prompt.worktree,
@@ -1461,14 +1538,20 @@ fn review_prompt(
     };
     let review_bot_section = if is_review_task {
         format!(
-            r#"Embedded PR review bot instructions:
+            r#"内置 PR 审查规范:
+```markdown
+{}
+```
+
+Few-shot examples:
 ```markdown
 {}
 ```"#,
-            PR_REVIEW_BOT_PROMPT.trim()
+            PR_REVIEW_BOT_PROMPT.trim(),
+            PR_REVIEW_FEW_SHOTS_PROMPT.trim()
         )
     } else {
-        "Embedded PR review bot instructions: not loaded because this trigger is not a review task."
+        "内置 PR 审查规范：本 trigger 不是 review 任务，因此不加载。"
             .into()
     };
     let review_context_section = review_context
@@ -1553,7 +1636,7 @@ Execution instructions:
 - {review_hint}
 - Do exactly what the trigger comment asks for.
 - For review tasks, follow the embedded PR review bot instructions exactly. They are part of this plugin binary and do not depend on any external skill.
-- For review tasks, do not run `gh api` to create comments. The plugin owns GitHub comment publishing after validating your JSON.
+- For review tasks, do not run `gh api` to create comments. The plugin owns GitHub comment publishing after validating your finding tags.
 - For review tasks, read-only `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue list`, `gh pr list`, and `gh api` GET calls are allowed when useful.
 - The plugin posts all GitHub review comments after you respond. Do not post the final summary yourself.
 - For non-review tasks, still stay scoped to this PR/repository unless the user clearly asks otherwise.

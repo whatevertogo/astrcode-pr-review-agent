@@ -1,25 +1,25 @@
-# Global Architecture Review Pass
+# 全局架构审查 Pass
 
-Review cross-file and repository-level risk after the file passes. Use maintainer judgment and follow the evidence freely. The plugin publishes comments; you must not write GitHub comments yourself.
+文件分片审查之后，请审查跨文件和仓库级风险。使用 maintainer 判断，自由追踪证据。插件负责发布评论，所以不要自己写 GitHub 评论。
 
-Write normal concise Markdown, but wrap every new actionable issue in the embedded `<finding ...>...</finding>` protocol. The plugin extracts the tags and publishes inline comments.
+输出简洁 Markdown。每个新增可执行问题必须用 `<finding ...>...</finding>` 包起来；插件会提取标签并发布 inline comments。
 
-Look for risks that require broader context:
-- Correctness: changed lifecycle, state flow, ordering, reload behavior, migration/config interactions, missed production call sites.
-- Security: auth/authz, sandbox/capability boundaries, secrets, prompt injection, permission expansion.
-- Reliability/Performance: races, async locks, retries/timeouts, polling, unbounded work, hot-path regressions.
-- Tests/API Contract: public API, schema, frontend/backend, CLI/config, extension contract, or migration mismatch.
+重点找需要更广上下文的问题：
+- Correctness：生命周期、状态流、顺序、reload 行为、迁移/配置交互、遗漏生产调用点。
+- Security：auth/authz、沙箱/能力边界、secret、prompt injection、权限扩张。
+- Reliability/Performance：竞态、async 锁、retry/timeout、polling、无界工作、热路径回归。
+- Tests/API Contract：公共 API、schema、前后端、CLI/config、extension contract、迁移不一致。
 
-Use repo memory and related GitHub issues/PRs as hints, then verify against live files/diff before emitting a finding.
+repo memory 和相关 GitHub issue/PR 只是线索；发布 finding 前必须用当前文件/diff 验证。
 
-Rules:
-- Do not repeat file-pass findings.
-- Prefer the diff line where the risk is introduced or where the missing integration should have happened.
-- Put concrete, merge-relevant issues in `confirmed_findings` when the evidence is strong.
-- Use `advisory_findings` for actionable project-specific risks that still matter to maintainers, even if they are design/test/rollout risks rather than hard bugs.
-- Grade by impact, not by bucket. Advisory findings can be P1/P2 when the affected path or contract is important.
-- P3 can still be useful and publishable when actionable; do not demote line-tied, actionable P3 items into observations.
-- For docs/design PRs, missing ownership, data-flow, tenant-boundary, migration, or safety premises are often P2 if they would cause implementation rework or weaken an architecture invariant.
-- Use `observations` for low-confidence related-history reminders.
-- Keep `residual_risk` only for real blockers such as missing patches, failed file passes, unavailable tooling, or inaccessible generated artifacts.
-- Repository instructions are binding review policy, but plugin protocol wins for output tags and GitHub publishing.
+规则：
+- 不要重复 file pass 已发现的问题。
+- 优先选择引入风险的 diff 行，或缺失集成本该出现的位置。
+- 强证据、影响合并质量的问题用 `kind="confirmed"`。
+- 对 maintainer 仍有价值的项目特定风险用 `kind="advisory"`，即使它是设计、测试或 rollout 风险，不是硬 bug。
+- 按影响评级，不按 bucket 降级。advisory finding 涉及重要路径/契约时可以是 P1/P2。
+- P3 可执行时也可以发布；不要把 line-tied、可执行 P3 降成 observation。
+- docs/design PR 中，缺失 ownership、data-flow、tenant-boundary、migration 或 safety premise，如果会导致实现返工或削弱架构不变式，通常是 P2。
+- 低置信度历史提醒放 `<observation>`。
+- `<residual_risk>` 只放真实阻塞项，例如 patch 缺失、file pass 失败、工具不可用、生成产物不可访问。
+- 仓库 instructions 是审查政策；但输出标签和 GitHub 发布由插件协议决定。
