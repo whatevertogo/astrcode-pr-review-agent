@@ -306,7 +306,7 @@ mod tests {
         assert!(prompt.contains("Improve storage durability."));
         assert!(prompt.contains("src/storage.rs"));
         assert!(prompt.contains("Do exactly what the trigger comment asks for."));
-        assert!(prompt.contains("return strict JSON only"));
+        assert!(prompt.contains("tagged Markdown findings"));
         assert!(prompt.contains("Embedded PR Review Bot Instructions"));
         assert!(prompt.contains("Correctness"));
         assert!(prompt.contains("Security"));
@@ -314,10 +314,10 @@ mod tests {
         assert!(prompt.contains("Tests/API Contract"));
         assert!(prompt.contains("Plugin-collected GitHub PR context"));
         assert!(prompt.contains("GitHub command audit"));
-        assert!(prompt.contains("\"confirmed_findings\""));
-        assert!(prompt.contains("\"severity\": \"P1\""));
+        assert!(prompt.contains("<finding"));
+        assert!(prompt.contains("priority=\"P1\""));
         assert!(prompt.contains("do not run `gh api` to create comments"));
-        assert!(prompt.contains("the plugin validates your JSON and publishes inline"));
+        assert!(prompt.contains("the plugin validates the tags and publishes inline"));
         assert!(prompt.contains("The plugin posts all GitHub review comments"));
         assert!(prompt.contains("gh pr view 7 --repo whatevertogo/astrcodey"));
         assert!(prompt.contains("rg -n"));
@@ -357,10 +357,10 @@ mod tests {
         assert!(prompt.starts_with("我是 whatevertogo 的替身。"));
         assert!(prompt.contains("Trigger type: new_pull_request"));
         assert!(prompt.contains("这是新 PR 首次发现自动 review"));
-        assert!(prompt.contains("return strict JSON only"));
+        assert!(prompt.contains("tagged Markdown findings"));
         assert!(prompt.contains("Embedded PR Review Bot Instructions"));
         assert!(prompt.contains("Plugin-collected GitHub PR context"));
-        assert!(prompt.contains("\"confirmed_findings\""));
+        assert!(prompt.contains("<finding"));
         assert!(!prompt.contains("gh api repos/{repo}/pulls/{pr}/comments"));
         assert!(!prompt.contains("Please use the reviewnow skill"));
         assert!(prompt.contains("created new PR session"));
@@ -387,7 +387,7 @@ mod tests {
         assert!(prompt.contains("Plugin-collected PR context"));
         assert!(prompt.contains("src/storage.rs"));
         assert!(!prompt.contains("GitHub command audit"));
-        assert!(prompt.contains("Return strict JSON only"));
+        assert!(prompt.contains("embedded tagged protocol"));
     }
 
     #[test]
@@ -469,6 +469,88 @@ mod tests {
         );
         assert_eq!(fenced_parsed.verification.len(), 0);
         assert!(parse_review_bot_output("not json").is_err());
+    }
+
+    #[test]
+    fn review_bot_json_preserves_legacy_observation_objects() {
+        let plain = r#"{
+            "confirmed_findings": [],
+            "advisory_findings": [],
+            "observations": [{
+                "id": "OBS-HOST-ROUTER-PERMISSION-BROADENING",
+                "type": "risky_subsystem",
+                "severity": "high",
+                "content": "SessionControl can read events without a caller session."
+            }],
+            "files_reviewed": [],
+            "investigation_log": [],
+            "residual_risk": [],
+            "summary": "Orientation only."
+        }"#;
+
+        let parsed = parse_review_bot_output(plain).unwrap();
+        let observation = parsed.observations.first().unwrap();
+
+        assert_eq!(observation.confidence.as_deref(), Some("high"));
+        assert_eq!(observation.category.as_deref(), Some("risky_subsystem"));
+        assert_eq!(
+            observation.title.as_deref(),
+            Some("OBS-HOST-ROUTER-PERMISSION-BROADENING")
+        );
+        assert_eq!(
+            observation.evidence.as_deref(),
+            Some("SessionControl can read events without a caller session.")
+        );
+    }
+
+    #[test]
+    fn review_bot_parses_tagged_markdown_findings() {
+        let tagged = r#"
+I checked the storage path.
+
+<files_reviewed>
+src/storage.rs
+</files_reviewed>
+
+<finding kind="confirmed" priority="P2" confidence="high" category="Correctness" path="src/storage.rs" side="RIGHT" line="42" title="Persist before mutating the index">
+Issue: The index is mutated before the durable write completes.
+Evidence: RIGHT 42 updates the map before persist_note returns.
+Project context: Store rebuild relies on disk being the source of truth.
+Impact: A crash can expose memory that cannot be reconstructed.
+Fix: Write the note first, then update the in-memory index.
+</finding>
+
+<observation confidence="medium" category="Repo History" title="Related migration risk">
+Evidence: PR #620 touched the same storage migration.
+Project context: The memory store has legacy import paths.
+Impact: The reviewer should re-check migration ordering.
+Next step: Inspect legacy.rs before publishing.
+</observation>
+
+<summary>
+One concrete finding and one repo-history reminder.
+</summary>
+"#;
+
+        let parsed = parse_review_bot_output(tagged).unwrap();
+        let finding = parsed.confirmed_findings.first().unwrap();
+
+        assert_eq!(parsed.files_reviewed, vec!["src/storage.rs"]);
+        assert_eq!(finding.severity.as_deref(), Some("P2"));
+        assert_eq!(finding.confidence.as_deref(), Some("high"));
+        assert_eq!(finding.category.as_deref(), Some("Correctness"));
+        assert_eq!(finding.path.as_deref(), Some("src/storage.rs"));
+        assert_eq!(finding.side.as_deref(), Some("RIGHT"));
+        assert_eq!(finding.line, Some(42));
+        assert_eq!(
+            finding.issue.as_deref(),
+            Some("The index is mutated before the durable write completes.")
+        );
+        assert_eq!(parsed.observations.len(), 1);
+        assert_eq!(
+            parsed.summary.as_deref(),
+            Some("One concrete finding and one repo-history reminder.")
+        );
     }
 
     #[test]
@@ -730,6 +812,11 @@ mod tests {
 
         let first =
             enqueue_auto_review_trigger(&config, &mut state, "VitaDynamics/Vvbot", &pr()).unwrap();
+        state
+            .auto_pr_reviews
+            .get_mut("VitaDynamics/Vvbot#7")
+            .unwrap()
+            .status = STATUS_COMMENTED.into();
         let mut updated = pr();
         updated.head_ref_oid = "def456".into();
         let second =
@@ -745,11 +832,41 @@ mod tests {
                 .get("VitaDynamics/Vvbot#7")
                 .unwrap()
                 .status,
-            STATUS_PENDING
+            STATUS_COMMENTED
         );
         assert_eq!(
             state
                 .seen_open_prs
+                .get("VitaDynamics/Vvbot#7")
+                .unwrap()
+                .head_sha,
+            "def456"
+        );
+    }
+
+    #[test]
+    fn pending_auto_review_is_requeued_after_interrupted_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let mut state = State::default();
+        baseline_auto_review_repos(&config, &mut state, &[]).unwrap();
+
+        let first =
+            enqueue_auto_review_trigger(&config, &mut state, "VitaDynamics/Vvbot", &pr()).unwrap();
+        assert!(first.is_some());
+
+        let mut updated = pr();
+        updated.head_ref_oid = "def456".into();
+        let recovered =
+            enqueue_auto_review_trigger(&config, &mut state, "VitaDynamics/Vvbot", &updated)
+                .unwrap();
+
+        let recovered = recovered.expect("pending auto review should be requeued");
+        assert!(recovered.is_auto_review());
+        assert_eq!(recovered.pr.head_ref_oid, "def456");
+        assert_eq!(
+            state
+                .auto_pr_reviews
                 .get("VitaDynamics/Vvbot#7")
                 .unwrap()
                 .head_sha,

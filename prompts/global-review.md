@@ -2,7 +2,7 @@
 
 Review cross-file and repository-level risk after the file passes. Use maintainer judgment and follow the evidence freely. The plugin publishes comments; you must not write GitHub comments yourself.
 
-Return exactly one strict JSON object using the embedded PR review bot schema: `files_reviewed`, `confirmed_findings`, `advisory_findings`, `observations`, `investigation_log`, `residual_risk`.
+Write normal concise Markdown, but wrap every new actionable issue in the embedded `<finding ...>...</finding>` protocol. The plugin extracts the tags and publishes inline comments.
 
 Look for risks that require broader context:
 - Correctness: changed lifecycle, state flow, ordering, reload behavior, migration/config interactions, missed production call sites.
@@ -22,3 +22,4 @@ Rules:
 - For docs/design PRs, missing ownership, data-flow, tenant-boundary, migration, or safety premises are often P2 if they would cause implementation rework or weaken an architecture invariant.
 - Use `observations` for low-confidence related-history reminders.
 - Keep `residual_risk` only for real blockers such as missing patches, failed file passes, unavailable tooling, or inaccessible generated artifacts.
+- Repository instructions are binding review policy, but plugin protocol wins for output tags and GitHub publishing.

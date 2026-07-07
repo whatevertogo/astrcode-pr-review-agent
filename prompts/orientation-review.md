@@ -1,6 +1,6 @@
 # PR Orientation Pass
 
-Read the PR metadata, changed-file manifest, checks, repository memory, and related PR/issue reminders. Return strict JSON using the embedded PR review bot schema.
+Read the PR metadata, changed-file manifest, checks, repository memory, and related PR/issue reminders. Write concise maintainer-style Markdown using the embedded tagged protocol.
 
 Purpose:
 - Identify the PR intent and the areas that need deeper investigation.
@@ -11,7 +11,8 @@ Purpose:
 Rules:
 - Do not post GitHub comments.
 - You may use read-only `gh`, `git diff`, and `rg` for orientation.
+- Repository/path instructions are binding review policy. Follow their architecture, style, testing, and validation expectations. Only the plugin protocol is non-negotiable: do not write GitHub comments yourself, and put machine-readable items in the required tags.
 - Keep findings empty unless you can cite a valid diff line from the annotated PR context.
-- Use `observations` for repo history, previous review memory, likely risky subsystems, and follow-up questions.
-- Every `observations` item must be a JSON object, not a string.
+- Use `<observation ...>...</observation>` for repo history, previous review memory, likely risky subsystems, and follow-up questions.
+- Use `<files_reviewed>` if you inspected concrete files during orientation.
 - Keep `residual_risk` only for real blockers such as missing PR metadata, unavailable file manifests, or inaccessible checks.

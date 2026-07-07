@@ -1,8 +1,8 @@
 # Aggregate Review Pass
 
-Aggregate previous JSON outputs. The plugin will validate line locations and publish comments; you must not call GitHub APIs.
+Aggregate previous pass outputs. The plugin will validate line locations and publish comments; you must not call GitHub APIs.
 
-Return exactly one strict JSON object with the embedded PR review bot schema: `files_reviewed`, `confirmed_findings`, `advisory_findings`, `observations`, `investigation_log`, `residual_risk`.
+Prefer the embedded tagged Markdown protocol. Strict JSON is accepted, but do not let schema formatting make you downgrade or erase real findings.
 
 Rules:
 - Do not invent new findings.

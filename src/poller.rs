@@ -365,10 +365,21 @@ fn enqueue_auto_review_trigger(
 
     let now = now_epoch();
     let is_new = mark_seen_open_pr(state, repo, pr, now);
+    let key = pr_key(repo, pr.number);
     if !is_new {
+        if let Some(record) = state.auto_pr_reviews.get_mut(&key) {
+            if record.status == STATUS_PENDING {
+                record.head_sha = pr.head_ref_oid.clone();
+                return Ok(Some(ReviewTrigger {
+                    repo: repo.to_owned(),
+                    pr: pr.clone(),
+                    kind: ReviewTriggerKind::NewPullRequest,
+                }));
+            }
+        }
         return Ok(None);
     }
-    let key = pr_key(repo, pr.number);
+
     if state.auto_pr_reviews.contains_key(&key) {
         return Ok(None);
     }

@@ -762,11 +762,12 @@ Scope:
 - Worktree: `{worktree}`
 - Base branch: `{base}`
 - Head SHA: `{sha}`
-- Return strict JSON only.
 - Do not post GitHub comments.
+- Follow repository instructions as review policy. Only plugin protocol is fixed: do not write GitHub
+  comments yourself, and wrap machine-readable items in the embedded tags.
 - This pass should orient later reviewers: identify intent, risky subsystems, related PR/issue reminders, and useful investigation leads.
-- Put repo-history reminders in `observations`.
-- Put concrete metadata/check failures in `confirmed_findings` or `advisory_findings` only if they can be tied to a valid diff line from the annotated context.
+- Put repo-history reminders in `<observation>` tags.
+- Put concrete metadata/check failures in `<finding>` tags only if they can be tied to a valid diff line from the annotated context.
 
 Repository and path instructions:
 ```markdown
@@ -871,11 +872,12 @@ Scope:
 - Head SHA: `{sha}`
 - Shard byte size: {shard_bytes}
 - Review only this shard's files.
-- Return strict JSON only.
 - Do not post GitHub comments.
-- Include every shard file path in `files_reviewed` if you inspected it.
-- Put actionable issues in `confirmed_findings` or `advisory_findings`; do not create `verification` items or "passed" review notes.
+- Include every shard file path in `<files_reviewed>` if you inspected it.
+- Put actionable issues in `<finding>` tags; do not create `verification` items or "passed" review notes.
 - Grade severity by impact, not by bucket. P1/P2 are valid for API contract, reliability, and test risks when they affect merge quality.
+- Follow repository instructions as review policy. Only plugin protocol is fixed: do not write GitHub
+  comments yourself, and wrap machine-readable items in the embedded tags.
 
 Reviewer profile:
 ```markdown
@@ -960,10 +962,11 @@ Scope:
 - Head SHA: `{sha}`
 - Look for cross-file correctness, security, reliability/performance, and Tests/API Contract issues.
 - Do not repeat findings already present in file pass outputs.
-- Return strict JSON only.
 - Do not post GitHub comments.
-- Put actionable issues in `confirmed_findings` or `advisory_findings`; do not create `verification` items or "passed" review notes.
+- Put actionable issues in `<finding>` tags; do not create `verification` items or "passed" review notes.
 - Grade severity by impact, not by bucket. P1/P2 are valid for API contract, reliability, and test risks when they affect merge quality.
+- Follow repository instructions as review policy. Only plugin protocol is fixed: do not write GitHub
+  comments yourself, and wrap machine-readable items in the embedded tags.
 
 Repository-level instructions:
 ```markdown
@@ -1448,10 +1451,10 @@ fn review_prompt(
     let is_review_task = review_context.is_some();
     let review_hint = if trigger.is_auto_review() {
         "This is an automatic review for a newly discovered PR. Use the embedded PR review bot \
-         instructions and return strict JSON only. Do not wait for another user prompt."
+         instructions and return tagged Markdown findings. Do not wait for another user prompt."
     } else if is_review_task {
         "The trigger asks for review. Use the embedded PR review bot instructions and return \
-         strict JSON only."
+         tagged Markdown findings."
     } else {
         "The trigger does not explicitly ask for review. Do not force a code review; follow the \
          trigger comment directly."
@@ -1484,9 +1487,9 @@ fn review_prompt(
                 .into()
         });
     let response_instruction = if is_review_task {
-        "Return only strict JSON matching the embedded schema. Do not wrap it in Markdown. Do not \
-         post GitHub comments yourself; the plugin validates your JSON and publishes inline \
-         comments."
+        "Write concise Markdown, but wrap every actionable issue in <finding> tags and list \
+         inspected files in <files_reviewed>. Do not post GitHub comments yourself; the plugin \
+         validates the tags and publishes inline comments."
     } else {
         "Return GitHub-ready Markdown only."
     };
@@ -2316,9 +2319,334 @@ async fn parse_or_repair_review_output(
 }
 
 fn parse_review_bot_output(text: &str) -> Result<ReviewBotOutput> {
-    let candidate = extract_json_object(text).context("assistant response did not contain JSON")?;
-    serde_json::from_str(candidate)
-        .with_context(|| "parse assistant response as ReviewBotOutput JSON")
+    let json_error = match extract_json_object(text) {
+        Some(candidate) => match serde_json::from_str(candidate) {
+            Ok(output) => return Ok(output),
+            Err(error) => Some(error),
+        },
+        None => None,
+    };
+    match parse_tagged_review_output(text) {
+        Ok(output) => Ok(output),
+        Err(tag_error) => match json_error {
+            Some(error) => Err(error).with_context(|| {
+                format!(
+                    "parse assistant response as ReviewBotOutput JSON; tagged parse also failed: \
+                     {tag_error:#}"
+                )
+            }),
+            None => Err(tag_error),
+        },
+    }
+}
+
+#[derive(Debug)]
+struct TaggedBlock {
+    attrs: BTreeMap<String, String>,
+    body: String,
+}
+
+fn parse_tagged_review_output(text: &str) -> Result<ReviewBotOutput> {
+    let mut output = ReviewBotOutput::default();
+    let mut recognized = false;
+
+    let files_reviewed = extract_tag_blocks(text, "files_reviewed")
+        .into_iter()
+        .flat_map(|block| parse_tagged_list(&block.body))
+        .collect::<Vec<_>>();
+    if !files_reviewed.is_empty() {
+        recognized = true;
+        output.files_reviewed = files_reviewed;
+    }
+
+    for block in extract_tag_blocks(text, "finding") {
+        recognized = true;
+        let kind = block
+            .attrs
+            .get("kind")
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_else(|| "confirmed".into());
+        let finding = tagged_finding(&block);
+        if kind == "advisory" {
+            output.advisory_findings.push(finding);
+        } else {
+            output.confirmed_findings.push(finding);
+        }
+    }
+
+    for block in extract_tag_blocks(text, "observation") {
+        recognized = true;
+        output.observations.push(tagged_observation(&block));
+    }
+
+    let investigation_log = extract_tag_blocks(text, "investigation_log")
+        .into_iter()
+        .flat_map(|block| parse_tagged_list(&block.body))
+        .collect::<Vec<_>>();
+    if !investigation_log.is_empty() {
+        recognized = true;
+        output.investigation_log = investigation_log;
+    }
+
+    let residual_risk = extract_tag_blocks(text, "residual_risk")
+        .into_iter()
+        .flat_map(|block| parse_tagged_list(&block.body))
+        .collect::<Vec<_>>();
+    if !residual_risk.is_empty() {
+        recognized = true;
+        output.residual_risk = residual_risk;
+    }
+
+    if let Some(summary) = extract_tag_blocks(text, "summary")
+        .into_iter()
+        .map(|block| block.body.trim().to_owned())
+        .find(|summary| !summary.is_empty())
+    {
+        recognized = true;
+        output.summary = Some(summary);
+    }
+
+    if recognized {
+        Ok(output)
+    } else {
+        anyhow::bail!("assistant response contained neither review JSON nor tagged review blocks")
+    }
+}
+
+fn tagged_finding(block: &TaggedBlock) -> ReviewFinding {
+    let sections = tagged_body_sections(&block.body);
+    ReviewFinding {
+        severity: tagged_value(block, &sections, &["priority", "severity"]),
+        confidence: tagged_value(block, &sections, &["confidence"]),
+        category: tagged_value(block, &sections, &["category"]),
+        path: tagged_value(block, &sections, &["path", "file"]),
+        side: tagged_value(block, &sections, &["side"]).or_else(|| Some("RIGHT".into())),
+        line: tagged_u64(block, &sections, &["line"]),
+        title: tagged_value(block, &sections, &["title"])
+            .or_else(|| first_meaningful_line(&block.body)),
+        issue: tagged_value(block, &sections, &["issue", "problem"])
+            .or_else(|| first_meaningful_line(&block.body)),
+        evidence: tagged_value(block, &sections, &["evidence"]),
+        project_context: tagged_value(block, &sections, &["project_context", "project context"]),
+        impact: tagged_value(block, &sections, &["impact"]),
+        fix: tagged_value(block, &sections, &["fix", "next_step", "next step"]),
+    }
+}
+
+fn tagged_observation(block: &TaggedBlock) -> ReviewObservation {
+    let sections = tagged_body_sections(&block.body);
+    ReviewObservation {
+        confidence: tagged_value(block, &sections, &["confidence"]).or_else(|| Some("low".into())),
+        category: tagged_value(block, &sections, &["category"]).or_else(|| Some("Observation".into())),
+        path: tagged_value(block, &sections, &["path", "file"]),
+        line: tagged_u64(block, &sections, &["line"]),
+        title: tagged_value(block, &sections, &["title"])
+            .or_else(|| first_meaningful_line(&block.body)),
+        evidence: tagged_value(block, &sections, &["evidence"])
+            .or_else(|| first_meaningful_line(&block.body)),
+        project_context: tagged_value(block, &sections, &["project_context", "project context"]),
+        impact: tagged_value(block, &sections, &["impact"]),
+        next_step: tagged_value(block, &sections, &["next_step", "next step", "fix"]),
+    }
+}
+
+fn tagged_value(
+    block: &TaggedBlock,
+    sections: &BTreeMap<String, String>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| {
+            let normalized = normalize_tag_key(key);
+            block
+                .attrs
+                .get(&normalized)
+                .or_else(|| sections.get(&normalized))
+                .map(|value| value.trim().to_owned())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn tagged_u64(
+    block: &TaggedBlock,
+    sections: &BTreeMap<String, String>,
+    keys: &[&str],
+) -> Option<u64> {
+    tagged_value(block, sections, keys).and_then(|value| value.parse::<u64>().ok())
+}
+
+fn extract_tag_blocks(text: &str, tag: &str) -> Vec<TaggedBlock> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut cursor = 0usize;
+    let mut blocks = Vec::new();
+    while let Some(start_rel) = text[cursor..].find(&open) {
+        let start = cursor + start_rel;
+        let attrs_start = start + open.len();
+        let Some(open_end_rel) = text[attrs_start..].find('>') else {
+            break;
+        };
+        let open_end = attrs_start + open_end_rel;
+        let body_start = open_end + 1;
+        let Some(close_rel) = text[body_start..].find(&close) else {
+            break;
+        };
+        let body_end = body_start + close_rel;
+        blocks.push(TaggedBlock {
+            attrs: parse_tag_attrs(&text[attrs_start..open_end]),
+            body: text[body_start..body_end].trim().to_owned(),
+        });
+        cursor = body_end + close.len();
+    }
+    blocks
+}
+
+fn parse_tag_attrs(input: &str) -> BTreeMap<String, String> {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    let mut attrs = BTreeMap::new();
+    while index < chars.len() {
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        let key_start = index;
+        while index < chars.len()
+            && !chars[index].is_whitespace()
+            && chars[index] != '='
+            && chars[index] != '/'
+        {
+            index += 1;
+        }
+        if key_start == index {
+            index += 1;
+            continue;
+        }
+        let key = normalize_tag_key(&chars[key_start..index].iter().collect::<String>());
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if index >= chars.len() || chars[index] != '=' {
+            attrs.insert(key, "true".into());
+            continue;
+        }
+        index += 1;
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if index >= chars.len() {
+            break;
+        }
+        let value = if chars[index] == '"' || chars[index] == '\'' {
+            let quote = chars[index];
+            index += 1;
+            let value_start = index;
+            while index < chars.len() && chars[index] != quote {
+                index += 1;
+            }
+            let value = chars[value_start..index].iter().collect::<String>();
+            if index < chars.len() {
+                index += 1;
+            }
+            value
+        } else {
+            let value_start = index;
+            while index < chars.len() && !chars[index].is_whitespace() {
+                index += 1;
+            }
+            chars[value_start..index].iter().collect::<String>()
+        };
+        attrs.insert(key, value);
+    }
+    attrs
+}
+
+fn tagged_body_sections(body: &str) -> BTreeMap<String, String> {
+    let mut sections = BTreeMap::new();
+    let mut current_key: Option<String> = None;
+    let mut current_value = String::new();
+    for line in body.lines() {
+        if let Some((key, value)) = parse_tagged_section_header(line) {
+            if let Some(key) = current_key.take() {
+                sections.insert(key, current_value.trim().to_owned());
+                current_value.clear();
+            }
+            current_key = Some(key);
+            current_value.push_str(value.trim());
+        } else if current_key.is_some() {
+            if !current_value.is_empty() {
+                current_value.push('\n');
+            }
+            current_value.push_str(line.trim());
+        }
+    }
+    if let Some(key) = current_key {
+        sections.insert(key, current_value.trim().to_owned());
+    }
+    sections
+}
+
+fn parse_tagged_section_header(line: &str) -> Option<(String, &str)> {
+    let trimmed = line
+        .trim()
+        .trim_start_matches('-')
+        .trim_start()
+        .trim_start_matches('*')
+        .trim();
+    let (raw_key, value) = trimmed.split_once(':')?;
+    let key = raw_key
+        .trim()
+        .trim_matches('*')
+        .trim_matches('`')
+        .trim();
+    let normalized = normalize_tag_key(key);
+    matches!(
+        normalized.as_str(),
+        "issue"
+            | "problem"
+            | "evidence"
+            | "project_context"
+            | "impact"
+            | "fix"
+            | "next_step"
+            | "priority"
+            | "severity"
+            | "confidence"
+            | "category"
+            | "path"
+            | "file"
+            | "side"
+            | "line"
+            | "title"
+    )
+    .then_some((normalized, value))
+}
+
+fn parse_tagged_list(body: &str) -> Vec<String> {
+    body.lines()
+        .flat_map(|line| line.split(','))
+        .map(|item| {
+            item.trim()
+                .trim_start_matches('-')
+                .trim_start()
+                .trim_matches('`')
+                .trim()
+                .to_owned()
+        })
+        .filter(|item| !item.is_empty() && item != "None" && item != "无")
+        .collect()
+}
+
+fn normalize_tag_key(key: &str) -> String {
+    key.trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
+}
+
+fn first_meaningful_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('<'))
+        .map(one_line)
 }
 
 fn deserialize_observations<'de, D>(deserializer: D) -> std::result::Result<Vec<ReviewObservation>, D::Error>
@@ -2340,12 +2668,53 @@ where
                 impact: None,
                 next_step: None,
             }),
-            Value::Object(_) => serde_json::from_value(value).map_err(serde::de::Error::custom),
+            Value::Object(object) => {
+                if object.contains_key("content")
+                    || object.contains_key("severity")
+                    || object.contains_key("type")
+                {
+                    Ok(legacy_observation_object(&object))
+                } else {
+                    serde_json::from_value(Value::Object(object)).map_err(serde::de::Error::custom)
+                }
+            },
             other => Err(serde::de::Error::custom(format!(
                 "observation must be object or string, got {other}"
             ))),
         })
         .collect()
+}
+
+fn legacy_observation_object(object: &serde_json::Map<String, Value>) -> ReviewObservation {
+    let text_field = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+    };
+    let severity = text_field("severity");
+    let confidence = severity.as_deref().map(|value| match value {
+        "high" => "high",
+        "medium" => "medium",
+        _ => "low",
+    });
+    let content = text_field("content").or_else(|| text_field("message"));
+    ReviewObservation {
+        confidence: confidence.map(str::to_owned).or_else(|| Some("low".into())),
+        category: text_field("category")
+            .or_else(|| text_field("type"))
+            .or_else(|| Some("Observation".into())),
+        path: text_field("path"),
+        line: object.get("line").and_then(Value::as_u64),
+        title: text_field("title")
+            .or_else(|| text_field("id"))
+            .or_else(|| content.as_ref().map(|text| one_line(text))),
+        evidence: content,
+        project_context: text_field("project_context"),
+        impact: text_field("impact"),
+        next_step: text_field("next_step"),
+    }
 }
 
 fn finding_fingerprint(finding: &ValidatedFinding) -> String {
