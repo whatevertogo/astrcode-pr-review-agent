@@ -3749,11 +3749,6 @@ fn publish_structured_review(
     let mut fallback_unplaced = validated.unplaced_findings.clone();
     let mut inline_findings = validated.inline_findings.clone();
     apply_severity_gate(config, trigger, &mut inline_findings, &mut fallback_unplaced);
-    let mut inline_comments_posted = inline_findings.len();
-    let mut posted_findings = Vec::new();
-    let mut inline_review_url = None;
-    let mut inline_review_id = None;
-    let mut publish_error = None;
     let highest_risk = inline_findings
         .first()
         .map(|finding| format!("{} {}", finding.priority, finding.title))
@@ -3763,34 +3758,16 @@ fn publish_structured_review(
                 .map(|finding| format!("{} {}", finding.priority, finding.title))
         });
 
-    if !inline_findings.is_empty() {
-        let review_body = inline_review_batch_body(
-            config,
-            trigger,
-            session_id,
-            inline_comments_posted,
-            fallback_unplaced.len(),
-            highest_risk.as_deref(),
-        );
-        match post_pull_review(config, trigger, &review_body, &inline_findings) {
-            Ok(review) => {
-                inline_review_url = review.url;
-                inline_review_id = review.id;
-                posted_findings = inline_findings
-                    .iter()
-                    .map(|finding| finding_memory_from_validated(finding, &trigger.pr.head_ref_oid))
-                    .collect();
-            },
-            Err(error) => {
-                let error_text = format!("GitHub rejected inline review payload: {error:#}");
-                publish_error = Some(error_text.clone());
-                fallback_unplaced.extend(inline_findings.drain(..).map(|finding| {
-                    unplaced_from_validated(finding, error_text.clone())
-                }));
-                inline_comments_posted = 0;
-            },
-        }
-    }
+    let publish = publish_inline_findings_with_fallback(
+        config,
+        trigger,
+        session_id,
+        inline_findings,
+        &mut fallback_unplaced,
+        highest_risk.as_deref(),
+        |body, findings| post_pull_review(config, trigger, body, findings),
+    );
+    let inline_findings = publish.inline_findings;
 
     let summary_validated = ValidatedReview {
         inline_findings: inline_findings.clone(),
@@ -3809,38 +3786,132 @@ fn publish_structured_review(
         trigger,
         session_id,
         validated: &summary_validated,
-        inline_comments_posted,
+        inline_comments_posted: publish.inline_comments_posted,
         unplaced_count: fallback_unplaced.len(),
         highest_risk: highest_risk.as_deref(),
-        publish_error: publish_error.as_deref(),
+        publish_error: publish.publish_error.as_deref(),
     };
     let summary_body = structured_review_summary_body(&summary_context);
     write_debug_artifact(
         validated.debug_dir.as_deref(),
         "publish-result.json",
         &serde_json::to_string_pretty(&json!({
-            "inline_review_url": inline_review_url.as_deref(),
-            "inline_review_id": inline_review_id,
-            "inline_comments_posted": inline_comments_posted,
+            "inline_review_url": publish.inline_review_url.as_deref(),
+            "inline_review_id": publish.inline_review_id,
+            "inline_comments_posted": publish.inline_comments_posted,
             "unplaced_findings_count": fallback_unplaced.len(),
             "highest_risk": highest_risk.as_deref(),
-            "publish_error": publish_error.as_deref(),
-            "posted_findings": &posted_findings,
+            "publish_error": publish.publish_error.as_deref(),
+            "individual_review_urls": publish.individual_review_urls,
+            "posted_findings": &publish.posted_findings,
         }))
         .unwrap_or_default(),
     );
 
     Ok(PublishedReview {
-        url: inline_review_url.clone(),
-        inline_review_url,
-        inline_review_id,
+        url: publish.inline_review_url.clone(),
+        inline_review_url: publish.inline_review_url,
+        inline_review_id: publish.inline_review_id,
         summary_body,
-        inline_comments_posted,
+        inline_comments_posted: publish.inline_comments_posted,
         unplaced_findings_count: fallback_unplaced.len(),
         highest_risk,
         verification: validated.verification.clone(),
-        posted_findings,
+        posted_findings: publish.posted_findings,
     })
+}
+
+#[derive(Debug, Default)]
+struct InlinePublishResult {
+    inline_findings: Vec<ValidatedFinding>,
+    posted_findings: Vec<FindingMemory>,
+    inline_comments_posted: usize,
+    inline_review_url: Option<String>,
+    inline_review_id: Option<u64>,
+    individual_review_urls: Vec<String>,
+    publish_error: Option<String>,
+}
+
+fn publish_inline_findings_with_fallback<F>(
+    config: &Config,
+    trigger: &ReviewTrigger,
+    session_id: &str,
+    inline_findings: Vec<ValidatedFinding>,
+    fallback_unplaced: &mut Vec<UnplacedFinding>,
+    highest_risk: Option<&str>,
+    mut post_review: F,
+) -> InlinePublishResult
+where
+    F: FnMut(&str, &[ValidatedFinding]) -> Result<PostedPullReview>,
+{
+    let mut result = InlinePublishResult::default();
+    if inline_findings.is_empty() {
+        return result;
+    }
+
+    let review_body = inline_review_batch_body(
+        config,
+        trigger,
+        session_id,
+        inline_findings.len(),
+        fallback_unplaced.len(),
+        highest_risk,
+    );
+    match post_review(&review_body, &inline_findings) {
+        Ok(review) => {
+            result.inline_comments_posted = inline_findings.len();
+            result.inline_review_url = review.url;
+            result.inline_review_id = review.id;
+            result.posted_findings = inline_findings
+                .iter()
+                .map(|finding| finding_memory_from_validated(finding, &trigger.pr.head_ref_oid))
+                .collect();
+            result.inline_findings = inline_findings;
+            return result;
+        },
+        Err(batch_error) => {
+            let batch_error_text =
+                format!("GitHub rejected batched inline review payload: {batch_error:#}");
+            let total = inline_findings.len();
+            for finding in inline_findings {
+                let single_body =
+                    inline_review_single_fallback_body(config, trigger, session_id, &finding);
+                match post_review(&single_body, std::slice::from_ref(&finding)) {
+                    Ok(review) => {
+                        if result.inline_review_url.is_none() {
+                            result.inline_review_url = review.url.clone();
+                        }
+                        if result.inline_review_id.is_none() {
+                            result.inline_review_id = review.id;
+                        }
+                        if let Some(url) = review.url {
+                            result.individual_review_urls.push(url);
+                        }
+                        result
+                            .posted_findings
+                            .push(finding_memory_from_validated(
+                                &finding,
+                                &trigger.pr.head_ref_oid,
+                            ));
+                        result.inline_findings.push(finding);
+                    },
+                    Err(single_error) => {
+                        fallback_unplaced.push(unplaced_from_validated(
+                            finding,
+                            format!("{batch_error_text}; individual retry failed: {single_error:#}"),
+                        ));
+                    },
+                }
+            }
+            result.inline_comments_posted = result.inline_findings.len();
+            result.publish_error = Some(format!(
+                "{batch_error_text}; retried {total} finding(s) individually, posted {}, failed {}",
+                result.inline_comments_posted,
+                total.saturating_sub(result.inline_comments_posted)
+            ));
+            result
+        },
+    }
 }
 
 fn suppress_repeated_findings(
@@ -3989,6 +4060,38 @@ Head SHA: `{sha}`
         inline_comments_posted = inline_comments_posted,
         highest_risk = highest_risk.unwrap_or("None"),
         unplaced_count = unplaced_count,
+    )
+}
+
+fn inline_review_single_fallback_body(
+    config: &Config,
+    trigger: &ReviewTrigger,
+    session_id: &str,
+    finding: &ValidatedFinding,
+) -> String {
+    let trigger_line = match trigger.comment() {
+        Some(comment) => format!("Trigger comment: `{}`", comment.id),
+        None => "Trigger: new PR auto review".into(),
+    };
+    format!(
+        r#"{marker}
+{AGENT_LINE}
+
+Review session: `{session_id}`
+{trigger_line}
+Head SHA: `{sha}`
+
+批量 GitHub Review payload 被拒绝，正在降级为逐条 inline 发布。
+
+- Finding: [{priority}] {title}
+"#,
+        marker = config.comment_marker,
+        AGENT_LINE = AGENT_LINE,
+        session_id = session_id,
+        trigger_line = trigger_line,
+        sha = trigger.pr.head_ref_oid,
+        priority = finding.priority,
+        title = finding.title,
     )
 }
 

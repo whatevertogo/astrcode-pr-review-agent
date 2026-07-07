@@ -798,6 +798,54 @@ One concrete finding and one repo-history reminder.
     }
 
     #[test]
+    fn batched_review_publish_falls_back_to_individual_findings() {
+        let config = Config::default();
+        let trigger = auto_trigger("VitaDynamics/Vvbot", 621);
+        let first = validated_finding("P1", "First issue", 10);
+        let second = validated_finding("P2", "Second issue", 11);
+        let mut unplaced = Vec::new();
+        let mut calls = 0usize;
+        let mut batch_sizes = Vec::new();
+
+        let result = publish_inline_findings_with_fallback(
+            &config,
+            &trigger,
+            "s1",
+            vec![first, second],
+            &mut unplaced,
+            Some("P1 First issue"),
+            |_body, findings| {
+                calls += 1;
+                batch_sizes.push(findings.len());
+                if calls == 1 {
+                    anyhow::bail!("422 Unprocessable Entity");
+                }
+                if findings[0].title == "Second issue" {
+                    anyhow::bail!("individual line rejected");
+                }
+                Ok(PostedPullReview {
+                    url: Some(format!("https://github.test/review/{calls}")),
+                    id: Some(calls as u64),
+                })
+            },
+        );
+
+        assert_eq!(batch_sizes, vec![2, 1, 1]);
+        assert_eq!(result.inline_comments_posted, 1);
+        assert_eq!(result.inline_findings[0].title, "First issue");
+        assert_eq!(result.posted_findings.len(), 1);
+        assert_eq!(result.individual_review_urls.len(), 1);
+        assert_eq!(unplaced.len(), 1);
+        assert_eq!(unplaced[0].title, "Second issue");
+        assert!(unplaced[0].reason.contains("individual retry failed"));
+        assert!(result
+            .publish_error
+            .as_deref()
+            .unwrap()
+            .contains("retried 2 finding(s) individually, posted 1, failed 1"));
+    }
+
+    #[test]
     fn auto_review_baseline_marks_existing_open_prs_without_queueing() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
