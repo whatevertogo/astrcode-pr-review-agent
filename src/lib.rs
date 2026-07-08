@@ -980,8 +980,27 @@ One concrete finding and one repo-history reminder.
         assert!(
             failure_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。")
         );
-        assert!(failure_body.contains("自动 review 失败"));
+        assert!(failure_body.contains("PR review 失败"));
+        assert!(failure_body.contains("Trigger: new PR auto review"));
         assert!(failure_body.contains("@whatevertogo review it"));
+    }
+
+    #[test]
+    fn latest_error_from_session_log_extracts_provider_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("session-s1.jsonl");
+        fs::write(
+            &log,
+            r#"{"payload":{"type":"error_occurred","message":"first"}}
+{"payload":{"type":"turn_completed"}}
+{"payload":{"type":"error_occurred","message":"Client error (429): quota reached"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest_error_from_session_log(&log).as_deref(),
+            Some("Client error (429): quota reached")
+        );
     }
 
     #[test]

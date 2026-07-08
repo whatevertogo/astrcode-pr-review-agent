@@ -471,7 +471,7 @@ async fn process_trigger(
         Err(error) => {
             let error_text = error.to_string();
             mark_trigger_failed(state, &key, &trigger, error_text.clone());
-            if trigger.is_auto_review() && config.auto_review_failure_comment {
+            if config.auto_review_failure_comment {
                 match post_auto_review_failure_comment(config, &trigger, &error_text) {
                     Ok(Some(url)) => update_auto_review_failure_comment(state, &key, url),
                     Ok(None) => {},

@@ -458,14 +458,15 @@ async fn run_coverage_first_review(
         .await
         {
             Ok(output) => outputs.push(output),
-            Err(error) => outputs.push(ReviewBotOutput {
-                residual_risk: vec![format!("orientation pass failed: {error:#}")],
-                summary: Some("Orientation pass failed; file/global passes continued.".into()),
-                ..ReviewBotOutput::default()
-            }),
+            Err(error) => {
+                anyhow::bail!(
+                    "orientation review pass failed; review did not complete: {error:#}"
+                );
+            },
         }
     }
 
+    let mut successful_file_passes = 0usize;
     for shard in shards.iter().take(max_file_passes) {
         let prompt_context = PassPromptContext {
             config,
@@ -489,6 +490,7 @@ async fn run_coverage_first_review(
         .await
         {
             Ok(output) => {
+                successful_file_passes += 1;
                 let reviewed = output
                     .files_reviewed
                     .iter()
@@ -529,6 +531,16 @@ async fn run_coverage_first_review(
             },
         }
     }
+    if successful_file_passes == 0
+        && shards.iter().take(max_file_passes).any(|shard| {
+            shard
+                .files
+                .iter()
+                .any(|file| matches!(file.kind, ReviewFileKind::Code | ReviewFileKind::Docs))
+        })
+    {
+        anyhow::bail!("all file review passes failed; review did not complete");
+    }
     for shard in shards.iter().skip(max_file_passes) {
         for file in &shard.files {
             if matches!(file.kind, ReviewFileKind::Code | ReviewFileKind::Docs) {
@@ -567,11 +579,9 @@ async fn run_coverage_first_review(
         {
             Ok(output) => outputs.push(output),
             Err(error) => {
-                outputs.push(ReviewBotOutput {
-                    residual_risk: vec![format!("global review pass failed: {error:#}")],
-                    summary: Some("Global risk pass failed; file pass results were used.".into()),
-                    ..ReviewBotOutput::default()
-                });
+                anyhow::bail!(
+                    "global review pass failed; review did not complete: {error:#}"
+                );
             },
         }
     }
@@ -2332,12 +2342,17 @@ fn auto_review_failure_comment_body(
     trigger: &ReviewTrigger,
     error: &str,
 ) -> String {
+    let trigger_line = match trigger.comment() {
+        Some(comment) => format!("Trigger comment: `{}`", comment.id),
+        None => "Trigger: new PR auto review".into(),
+    };
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-自动 review 失败，未继续重试。
+PR review 失败，未继续重试。
 
+{trigger_line}
 Head SHA: `{sha}`
 Error: `{error}`
 
@@ -2345,6 +2360,7 @@ Error: `{error}`
 "#,
         marker = config.comment_marker,
         AGENT_LINE = AGENT_LINE,
+        trigger_line = trigger_line,
         sha = trigger.pr.head_ref_oid,
         error = error.replace('`', "'"),
         mention = config.mention,
@@ -4429,8 +4445,14 @@ async fn wait_for_review_after_count(
                 let idle_since =
                     idle_without_assistant_since.get_or_insert_with(std::time::Instant::now);
                 if idle_since.elapsed() >= Duration::from_secs(30) {
+                    let detail = latest_session_error_message(session_id)
+                        .unwrap_or_else(|| {
+                            "review session became idle without producing a new assistant response"
+                                .into()
+                        });
                     anyhow::bail!(
-                        "review session became idle without producing a new assistant response"
+                        "review session became idle without producing a new assistant response; \
+                         latest session error: {detail}"
                     );
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -4451,6 +4473,51 @@ async fn conversation_snapshot(run_info: &RunInfo, session_id: &str) -> Result<V
         run_info.port
     );
     curl_json("GET", &url, &run_info.auth_token, None)
+}
+
+fn latest_session_error_message(session_id: &str) -> Option<String> {
+    let projects_dir = astrcode_dir().ok()?.join("projects");
+    let log_name = format!("session-{session_id}.jsonl");
+    let log_path = find_file_named(&projects_dir, &log_name, 6)?;
+    latest_error_from_session_log(&log_path)
+}
+
+fn find_file_named(root: &Path, file_name: &str, max_depth: usize) -> Option<PathBuf> {
+    if max_depth == 0 {
+        return None;
+    }
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_file_named(&path, file_name, max_depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn latest_error_from_session_log(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| {
+            let payload = event.get("payload")?;
+            (payload.get("type").and_then(Value::as_str) == Some("error_occurred"))
+                .then(|| {
+                    payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown session error")
+                        .to_owned()
+                })
+        })
+        .last()
 }
 
 fn curl_json(method: &str, url: &str, token: &str, payload: Option<&Value>) -> Result<Value> {
