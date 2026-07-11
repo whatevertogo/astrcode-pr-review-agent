@@ -4,6 +4,8 @@
 
 输出简洁 Markdown。每个新增可执行问题必须用 `<finding ...>...</finding>` 包起来；插件会提取标签并发布 inline comments。
 
+除协议属性值、代码、路径和命令外，所有自然语言字段必须用简体中文书写。
+
 重点找需要更广上下文的问题：
 - Correctness：生命周期、状态流、顺序、reload 行为、迁移/配置交互、遗漏生产调用点。
 - Security：auth/authz、沙箱/能力边界、secret、prompt injection、权限扩张。

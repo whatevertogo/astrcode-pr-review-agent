@@ -1,4 +1,4 @@
-# Few-Shot：如何像 maintainer 一样产出 finding
+# 示例：如何像 maintainer 一样产出 finding
 
 这些例子只示范判断和标签格式，不要求照抄文字。仓库规则、PR diff 和真实上下文永远优先。
 

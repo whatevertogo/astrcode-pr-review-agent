@@ -802,55 +802,54 @@ fn orientation_review_prompt(
     format!(
         r#"{AGENT_LINE}
 
-You are running the PR orientation pass for {repo} PR #{pr_number}: {title}
+你正在执行 {repo} PR #{pr_number}「{title}」的审查定向阶段。所有自然语言输出必须使用简体中文。
 
-Use this instruction file:
+使用以下指令文件：
 ```markdown
 {instructions}
 ```
 
-Shared review protocol:
+共享审查协议：
 ```markdown
 {protocol}
 ```
 
-Few-shot examples:
+示例：
 ```markdown
 {few_shots}
 ```
 
-Scope:
-- Worktree: `{worktree}`
-- Base branch: `{base}`
-- Head SHA: `{sha}`
-- Do not post GitHub comments.
-- Follow repository instructions as review policy. Only plugin protocol is fixed: do not write GitHub
-  comments yourself, and wrap machine-readable items in the embedded tags.
-- This pass should orient later reviewers: identify intent, risky subsystems, related PR/issue reminders, and useful investigation leads.
-- Put repo-history reminders in `<observation>` tags.
-- Put concrete metadata/check failures in `<finding>` tags only if they can be tied to a valid diff line from the annotated context.
+范围：
+- 工作树：`{worktree}`
+- 基准分支：`{base}`
+- Head SHA：`{sha}`
+- 不要发布 GitHub 评论。
+- 仓库 instructions 是审查政策。只有插件协议不可变：不要自行写 GitHub 评论，机器可读项必须放进内置标签。
+- 本阶段为后续审查定向：识别意图、高风险子系统、相关 PR/issue 提醒和有价值的调查线索。
+- 仓库历史提醒放进 `<observation>` 标签。
+- 只有能关联到注释上下文中有效 diff 行的具体元数据/检查失败，才能放进 `<finding>` 标签。
 
-Repository and path instructions:
+仓库和路径指令：
 ```markdown
 {repo_instructions}
 ```
 
-Relevant prior memory:
+相关既有记忆：
 ```markdown
 {memory}
 ```
 
-Deterministic checks already run:
+已执行的确定性检查：
 ```text
 {deterministic_checks}
 ```
 
-Changed-file manifest:
+变更文件清单：
 ```text
 {manifest}
 ```
 
-Plugin-collected PR context:
+插件收集的 PR 上下文：
 ```text
 {context}
 ```
@@ -876,7 +875,7 @@ Plugin-collected PR context:
         )
         .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
         memory = if memory.trim().is_empty() {
-            "No prior memory for this PR."
+            "这个 PR 暂无既有记忆。"
         } else {
             memory
         },
@@ -923,66 +922,65 @@ fn file_review_prompt(
     format!(
         r#"{AGENT_LINE}
 
-You are running file review pass {pass} for {repo} PR #{pr_number}.
+你正在执行 {repo} PR #{pr_number} 的第 {pass} 个文件审查阶段。所有自然语言输出必须使用简体中文。
 
-Use this instruction file:
+使用以下指令文件：
 ```markdown
 {instructions}
 ```
 
-Shared review protocol:
+共享审查协议：
 ```markdown
 {protocol}
 ```
 
-Few-shot examples:
+示例：
 ```markdown
 {few_shots}
 ```
 
-Scope:
-- Worktree: `{worktree}`
-- Head SHA: `{sha}`
-- Shard byte size: {shard_bytes}
-- Review only this shard's files.
-- Do not post GitHub comments.
-- Include every shard file path in `<files_reviewed>` if you inspected it.
-- Put actionable issues in `<finding>` tags; do not create `verification` items or "passed" review notes.
-- Grade severity by impact, not by bucket. P1/P2 are valid for API contract, reliability, and test risks when they affect merge quality.
-- Follow repository instructions as review policy. Only plugin protocol is fixed: do not write GitHub
-  comments yourself, and wrap machine-readable items in the embedded tags.
+范围：
+- 工作树：`{worktree}`
+- Head SHA：`{sha}`
+- 分片字节数：{shard_bytes}
+- 只审查本分片中的文件。
+- 不要发布 GitHub 评论。
+- 已检查的每个分片文件都必须列入 `<files_reviewed>`。
+- 可执行问题放进 `<finding>` 标签；不要创建 `verification` 项或“通过”的审查备注。
+- 按影响而不是按类别评级；影响合并质量的 API 契约、可靠性和测试风险可以是 P1/P2。
+- 仓库 instructions 是审查政策。只有插件协议不可变：不要自行写 GitHub 评论，机器可读项必须放进内置标签。
 
-Reviewer profile:
+审查者档案：
 ```markdown
 {reviewer_profile}
 ```
 
-Repository and path instructions:
+仓库和路径指令：
 ```markdown
 {repo_instructions}
 ```
 
-Deterministic checks already run:
+已执行的确定性检查：
 ```text
 {deterministic_checks}
 ```
-Use failed checks only as evidence for concrete findings. Do not summarize passed checks.
+失败检查只能作为具体发现的证据，不要汇总通过的检查。
 
-Relevant prior memory:
+相关既有记忆：
 ```markdown
 {memory}
 ```
 
-Memory paths:
-- PR memory: `{pr_memory_path}`
-- Repo memory index: `{repo_index_path}`
+记忆路径：
+- PR 记忆：`{pr_memory_path}`
+- 仓库记忆索引：`{repo_index_path}`
 
-Shard {pass} of coverage-first review:
+覆盖优先审查的第 {pass} 个分片：
 ```text
 {shard_text}
 ```
 
-Known non-inline-commentable files:
+已知无法行内评论的文件：
 ```text
 {non_commentable}
 ```
@@ -1002,7 +1000,7 @@ Known non-inline-commentable files:
         sha = prompt.trigger.pr.head_ref_oid,
         shard_bytes = shard.bytes,
         memory = if prompt.memory.trim().is_empty() {
-            "No prior memory for this PR."
+            "这个 PR 暂无既有记忆。"
         } else {
             prompt.memory
         },
@@ -1010,7 +1008,7 @@ Known non-inline-commentable files:
         repo_index_path = memory_paths.repo_index.display(),
         shard_text = shard_text,
         non_commentable = if prompt.context.non_commentable_files.is_empty() {
-            "None".into()
+            "无".into()
         } else {
             prompt.context.non_commentable_files.join("\n")
         },
@@ -1025,61 +1023,60 @@ fn global_review_prompt(
     format!(
         r#"{AGENT_LINE}
 
-You are running the global risk pass for {repo} PR #{pr_number}.
+你正在执行 {repo} PR #{pr_number} 的全局风险审查阶段。所有自然语言输出必须使用简体中文。
 
-Use this instruction file:
+使用以下指令文件：
 ```markdown
 {instructions}
 ```
 
-Shared review protocol:
+共享审查协议：
 ```markdown
 {protocol}
 ```
 
-Few-shot examples:
+示例：
 ```markdown
 {few_shots}
 ```
 
-Scope:
-- Worktree: `{worktree}`
-- Head SHA: `{sha}`
-- Look for cross-file correctness, security, reliability/performance, and Tests/API Contract issues.
-- Do not repeat findings already present in file pass outputs.
-- Do not post GitHub comments.
-- Put actionable issues in `<finding>` tags; do not create `verification` items or "passed" review notes.
-- Grade severity by impact, not by bucket. P1/P2 are valid for API contract, reliability, and test risks when they affect merge quality.
-- Follow repository instructions as review policy. Only plugin protocol is fixed: do not write GitHub
-  comments yourself, and wrap machine-readable items in the embedded tags.
+范围：
+- 工作树：`{worktree}`
+- Head SHA：`{sha}`
+- 查找跨文件的 Correctness、Security、Reliability/Performance 和 Tests/API Contract 问题。
+- 不要重复文件审查阶段已经发现的问题。
+- 不要发布 GitHub 评论。
+- 可执行问题放进 `<finding>` 标签；不要创建 `verification` 项或“通过”的审查备注。
+- 按影响而不是按类别评级；影响合并质量的 API 契约、可靠性和测试风险可以是 P1/P2。
+- 仓库 instructions 是审查政策。只有插件协议不可变：不要自行写 GitHub 评论，机器可读项必须放进内置标签。
 
-Repository-level instructions:
+仓库级指令：
 ```markdown
 {repo_instructions}
 ```
 
-Deterministic checks already run:
+已执行的确定性检查：
 ```text
 {deterministic_checks}
 ```
-Use failed checks only as evidence for concrete findings. Do not summarize passed checks.
+失败检查只能作为具体发现的证据，不要汇总通过的检查。
 
-Coverage:
+覆盖范围：
 ```text
 {coverage}
 ```
 
-File pass outputs:
+文件审查阶段输出：
 ```json
 {outputs}
 ```
 
-Prior memory:
+既有记忆：
 ```markdown
 {memory}
 ```
 
-Full PR context summary:
+完整 PR 上下文摘要：
 ```text
 {context}
 ```
@@ -1107,7 +1104,7 @@ Full PR context summary:
         coverage = coverage.summary_lines(),
         outputs = serde_json::to_string_pretty(outputs).unwrap_or_else(|_| "[]".into()),
         memory = if prompt.memory.trim().is_empty() {
-            "No prior memory for this PR."
+            "这个 PR 暂无既有记忆。"
         } else {
             prompt.memory
         },
@@ -1334,15 +1331,15 @@ fn format_verification_items(items: &[VerificationItem]) -> String {
         .map(|item| {
             format!(
                 "- `{}`: {} ({})",
-                item.command.as_deref().unwrap_or("unspecified"),
-                item.status.as_deref().unwrap_or("unknown"),
-                one_line(item.notes.as_deref().unwrap_or("no notes"))
+                item.command.as_deref().unwrap_or("未指定"),
+                item.status.as_deref().unwrap_or("未知"),
+                one_line(item.notes.as_deref().unwrap_or("无备注"))
             )
         })
         .collect::<Vec<_>>()
         ;
     if noteworthy.is_empty() {
-        "No deterministic check failures. Do not summarize passed checks.".into()
+        "没有确定性检查失败。不要汇总通过的检查。".into()
     } else {
         noteworthy.join("\n")
     }
@@ -1534,17 +1531,14 @@ fn review_prompt(
         .body
         .as_deref()
         .filter(|body| !body.trim().is_empty())
-        .unwrap_or("No PR body was available from GitHub metadata.");
+        .unwrap_or("GitHub 元数据中没有可用的 PR 描述。");
     let is_review_task = review_context.is_some();
     let review_hint = if trigger.is_auto_review() {
-        "This is an automatic review for a newly discovered PR. Use the embedded PR review bot \
-         instructions and return tagged Markdown findings. Do not wait for another user prompt."
+        "这是对新发现 PR 的自动审查。请按内置 PR 审查规范返回带标签的 Markdown 发现，不要等待下一条用户消息。"
     } else if is_review_task {
-        "The trigger asks for review. Use the embedded PR review bot instructions and return \
-         tagged Markdown findings."
+        "触发评论要求审查。请按内置 PR 审查规范返回带标签的 Markdown 发现。"
     } else {
-        "The trigger does not explicitly ask for review. Do not force a code review; follow the \
-         trigger comment directly."
+        "触发评论没有明确要求审查。不要强行进行代码审查，直接遵循触发评论。"
     };
     let review_bot_section = if is_review_task {
         format!(
@@ -1567,7 +1561,7 @@ Few-shot examples:
     let review_context_section = review_context
         .map(|context| {
             format!(
-                r#"Plugin-collected GitHub PR context:
+                r#"插件收集的 GitHub PR 上下文：
 ```text
 {}
 ```"#,
@@ -1575,61 +1569,58 @@ Few-shot examples:
             )
         })
         .unwrap_or_else(|| {
-            "Plugin-collected GitHub PR context: not loaded because this trigger is not a review \
-             task."
+            "插件收集的 GitHub PR 上下文：本次触发不是审查任务，因此未加载。"
                 .into()
         });
     let response_instruction = if is_review_task {
-        "Write concise Markdown, but wrap every actionable issue in <finding> tags and list \
-         inspected files in <files_reviewed>. Do not post GitHub comments yourself; the plugin \
-         validates the tags and publishes inline comments."
+        "使用简体中文编写简洁 Markdown；每个可执行问题都放进 <finding> 标签，已检查文件列入 <files_reviewed>。不要自行发布 GitHub 评论；插件会校验标签并发布行内评论。"
     } else {
-        "Return GitHub-ready Markdown only."
+        "只返回可直接发布到 GitHub 的简体中文 Markdown。"
     };
     format!(
         r##"{AGENT_LINE}
 
-You are handling GitHub PR #{pr_number} in {repo}. Follow the trigger instruction as the primary instruction.
+你正在处理 {repo} 的 GitHub PR #{pr_number}。以触发评论为最高优先级指令，并使用简体中文回复。
 
-PR title: {title}
-PR URL: {url}
-Author: {author}
-Base branch: {base}
-Head SHA: {sha}
-Worktree: {worktree}
-Trigger type: {trigger_kind}
-Trigger comment id: {comment_id}
-Trigger author: {trigger_author}
-Trigger created at: {created_at}
+PR 标题：{title}
+PR URL：{url}
+作者：{author}
+基准分支：{base}
+Head SHA：{sha}
+工作树：{worktree}
+触发类型：{trigger_kind}
+触发评论 ID：{comment_id}
+触发者：{trigger_author}
+触发时间：{created_at}
 
-PR body:
+PR 描述：
 ```markdown
 {pr_body}
 ```
 
-Changed files from GitHub metadata:
+GitHub 元数据中的变更文件：
 ```text
 {files}
 ```
 
-Trigger instruction:
+触发指令：
 ```text
 {trigger_body}
 ```
 
-Relevant prior PR memory:
+相关的既有 PR 记忆：
 ```markdown
 {memory}
 ```
 
-Context lookup:
+上下文查找：
 - Work from the checked-out PR worktree: `{worktree}`.
 - Treat `{repo}` PR #{pr_number} at head `{sha}` as the canonical scope unless the trigger explicitly says otherwise.
 - The plugin has already collected live GitHub PR metadata, PR files, checks, and annotated diff lines for review tasks.
 - Use targeted `git diff origin/{base}...HEAD -- <path>` and `rg` for extra local context when needed.
 - Prefer `rg` over broad grep/find when inspecting callers, tests, config, and related symbols.
 
-Memory lookup:
+记忆查找：
 - Repo memory index: `{repo_index_path}`
 - This PR memory: `{pr_memory_path}`
 - Run audit log: `{runs_log_path}`
@@ -1640,7 +1631,7 @@ Memory lookup:
 - Use "Related PRs and Issues" as reminder context. If a related PR/issue materially affects the review, cite it in observations or the final report with the reason.
 - Never repeat an old finding from memory unless the current diff still proves it.
 
-Execution instructions:
+执行要求：
 - This PR has one persistent Astrcode session. Treat this turn as the latest review pass for the same PR.
 - Session mode: {session_mode}.
 - {review_hint}
@@ -1678,7 +1669,7 @@ Execution instructions:
         comment_id = trigger
             .comment()
             .map(|comment| comment.id.to_string())
-            .unwrap_or_else(|| "none; automatic new PR review".into()),
+        .unwrap_or_else(|| "无；新 PR 自动审查".into()),
         trigger_author = trigger_author,
         created_at = trigger
             .comment()
@@ -1688,7 +1679,7 @@ Execution instructions:
         files = files,
         trigger_body = trigger_body,
         memory = if memory.trim().is_empty() {
-            "No prior memory for this PR."
+            "这个 PR 暂无既有记忆。"
         } else {
             memory
         },
@@ -2283,16 +2274,16 @@ fn review_comment_body(
     review: &str,
 ) -> String {
     let trigger_line = match trigger.comment() {
-        Some(comment) => format!("Trigger comment: `{}`", comment.id),
-        None => "Trigger: new PR auto review".into(),
+        Some(comment) => format!("触发评论：`{}`", comment.id),
+        None => "触发：新 PR 自动审查".into(),
     };
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-Review session: `{session_id}`
+审查会话：`{session_id}`
 {trigger_line}
-Head SHA: `{sha}`
+Head SHA：`{sha}`
 
 {review}
 "#,
@@ -2318,9 +2309,9 @@ fn auto_review_start_comment_body(config: &Config, trigger: &ReviewTrigger) -> S
         r#"{marker}
 {AGENT_LINE}
 
-检测到新的 PR，已启动自动 review。
+检测到新的 PR，已启动自动审查。
 
-Head SHA: `{sha}`
+Head SHA：`{sha}`
 "#,
         marker = config.comment_marker,
         AGENT_LINE = AGENT_LINE,
@@ -2343,18 +2334,18 @@ fn auto_review_failure_comment_body(
     error: &str,
 ) -> String {
     let trigger_line = match trigger.comment() {
-        Some(comment) => format!("Trigger comment: `{}`", comment.id),
-        None => "Trigger: new PR auto review".into(),
+        Some(comment) => format!("触发评论：`{}`", comment.id),
+        None => "触发：新 PR 自动审查".into(),
     };
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-PR review 失败，未继续重试。
+PR 审查失败，未继续重试。
 
 {trigger_line}
-Head SHA: `{sha}`
-Error: `{error}`
+Head SHA：`{sha}`
+错误：`{error}`
 
 可以在本 PR 评论 `{mention} review it` 手动重新触发。
 "#,
@@ -2981,7 +2972,7 @@ fn final_comment_report_prompt(
         .take(published.inline_comments_posted)
         .map(|finding| {
             format!(
-                "- [{}][{}][{}] {} `{}`:{} — {}\n  Evidence: {}\n  Issue: {}\n  Project context: {}\n  Impact: {}\n  Fix: {}",
+                "- [{}][{}][{}] {} `{}`:{} — {}\n  证据：{}\n  问题：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
                 finding.priority,
                 finding.kind.as_str(),
                 finding.confidence,
@@ -3004,7 +2995,7 @@ fn final_comment_report_prompt(
         .take(12)
         .map(|finding| {
             format!(
-                "- [{}][{}][{}] {} `{}`:{} — {}\n  Evidence: {}\n  Project context: {}\n  Impact: {}\n  Fix: {}",
+                "- [{}][{}][{}] {} `{}`:{} — {}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
                 finding.priority,
                 finding.kind.as_str(),
                 finding.confidence,
@@ -3038,7 +3029,7 @@ fn final_comment_report_prompt(
         .take(10)
         .map(|observation| {
             format!(
-                "- [{}][{}] {}{}{}\n  Evidence: {}\n  Project context: {}\n  Impact: {}\n  Next step: {}",
+                "- [{}][{}] {}{}{}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  下一步：{}",
                 observation
                     .confidence
                     .as_deref()
@@ -3064,7 +3055,7 @@ fn final_comment_report_prompt(
         .collect::<Vec<_>>()
         .join("\n");
     let investigation = if validated.investigation_log.is_empty() {
-        "None".into()
+        "无".into()
     } else {
         validated
             .investigation_log
@@ -3081,7 +3072,7 @@ fn final_comment_report_prompt(
         .unwrap_or_else(|| "coverage unavailable".into());
     let verification = verification_summary(&validated.verification);
     let residual = if validated.residual_risk.is_empty() {
-        "None".into()
+        "无".into()
     } else {
         validated
             .residual_risk
@@ -3092,76 +3083,76 @@ fn final_comment_report_prompt(
     };
     let changed_files = changed_file_summary(&trigger.pr);
     let inline_reference = match (&published.inline_review_id, &published.inline_review_url) {
-        (Some(id), Some(url)) => format!("GitHub review ID {id}, URL {url}"),
-        (Some(id), None) => format!("GitHub review ID {id}"),
-        (None, Some(url)) => format!("GitHub review URL {url}"),
-        (None, None) => "No inline review object was created".into(),
+        (Some(id), Some(url)) => format!("GitHub 审查 ID {id}，链接 {url}"),
+        (Some(id), None) => format!("GitHub 审查 ID {id}"),
+        (None, Some(url)) => format!("GitHub 审查链接 {url}"),
+        (None, None) => "未创建行内审查对象".into(),
     };
     format!(
         r#"{AGENT_LINE}
 
-Write the final GitHub PR review report for {repo} PR #{pr_number}: {title}
+请为 {repo} PR #{pr_number}「{title}」撰写最终 GitHub PR 审查报告。
 
-Rules:
-- Return strict JSON only: {{"report":"...markdown..."}}
-- Write a complete Chinese Markdown report in the old reviewnow style: concrete scope, verification, findings, merge assessment, low-confidence observations, what was done, next steps, and residual risk.
-- Do not include the HTML marker, agent line, review session, trigger, or head SHA; the plugin adds those.
-- Use the four unchanged review angles only: Correctness, Security, Reliability/Performance, Tests/API Contract.
-- Be concrete and grounded in the data below. Do not invent code facts, commands, line numbers, or risks.
-- If inline findings exist, include a `## 发现` section and summarize each issue with priority, file/line, angle, issue, impact, and fix.
-- If there are summary-only P1/P2 findings, include them under `## 发现` too, clearly marking why they were not inline.
-- If there are P3 summary-only findings or observations, include them under `## 设计提醒` or `## 低置信度观察` instead of pretending nothing was found.
-- If there are no inline findings, explain whether the run found summary-only advisory/observations or truly found no useful risk.
-- Keep `## 验证` useful: mention failed/skipped checks or meaningful validation, not a long list of "passed" boilerplate.
-- Include `## 合并评估`, `## 做了什么`, `## 下一步建议`, and `## 剩余风险`.
-- Low-confidence observations are allowed only when clearly labelled and useful.
-- Do not tell the user to run GitHub API commands. Inline comments have already been handled by the plugin.
+规则：
+- 只返回严格 JSON：{{"report":"...markdown..."}}。
+- 报告所有自然语言必须使用简体中文，并采用原 reviewnow 的风格：明确范围、验证、发现、合并评估、低置信度观察、做了什么、下一步建议和剩余风险。
+- 不要包含 HTML marker、agent 身份行、审查会话、触发信息或 Head SHA；插件会添加它们。
+- 只使用四个固定审查角度：Correctness、Security、Reliability/Performance、Tests/API Contract。
+- 内容必须具体，并以以下数据为依据；不要虚构代码事实、命令、行号或风险。
+- 存在行内发现时，写 `## 发现`，逐项概述优先级、文件/行、视角、问题、影响和修复建议。
+- P1/P2 的仅总结发现也放在 `## 发现`，并明确说明未能行内评论的原因。
+- P3 的仅总结发现或 observation 放到 `## 设计提醒` 或 `## 低置信度观察`，不要假装没有发现。
+- 没有行内发现时，要说明是有仅总结的风险/观察，还是确实没有有价值的风险。
+- `## 验证` 只写失败、跳过或有意义的检查，不要堆砌“通过”的样板文字。
+- 必须包含 `## 合并评估`、`## 做了什么`、`## 下一步建议` 和 `## 剩余风险`。
+- 低置信度观察必须清晰标注，且确实有用。
+- 不要让用户运行 GitHub API 命令；插件已经处理行内评论。
 
-Review result:
-- Coverage: {coverage}
-- Inline comments posted: {inline_count}
-- Inline review reference: {inline_reference}
-- Summary-only findings: {summary_only_count}
-- Observations: {observation_count}
-- Unplaced findings: {unplaced_count}
-- Highest risk: {highest_risk}
+审查结果：
+- 覆盖范围：{coverage}
+- 已发布行内评论：{inline_count}
+- 行内审查引用：{inline_reference}
+- 仅总结发现：{summary_only_count}
+- 观察：{observation_count}
+- 暂无法定位的发现：{unplaced_count}
+- 最高风险：{highest_risk}
 
-Changed files:
+变更文件：
 ```text
 {changed_files}
 ```
 
-Inline findings that were actually posted:
+实际已发布的行内发现：
 ```text
 {inline}
 ```
 
-Summary-only findings:
+仅总结的发现：
 ```text
 {summary_only}
 ```
 
-Unplaced finding notes:
+无法定位的发现说明：
 ```text
 {unplaced}
 ```
 
-Observations:
+观察：
 ```text
 {observations}
 ```
 
-Investigation log:
+调查记录：
 ```text
 {investigation}
 ```
 
-Noteworthy deterministic checks:
+值得关注的确定性检查：
 ```text
 {verification}
 ```
 
-Residual risk:
+剩余风险：
 ```text
 {residual}
 ```
@@ -3176,21 +3167,21 @@ Residual risk:
         summary_only_count = validated.summary_findings.len(),
         observation_count = validated.observations.len(),
         unplaced_count = published.unplaced_findings_count,
-        highest_risk = published.highest_risk.as_deref().unwrap_or("None"),
+        highest_risk = published.highest_risk.as_deref().unwrap_or("无"),
         changed_files = changed_files,
-        inline = if inline.trim().is_empty() { "None" } else { &inline },
+        inline = if inline.trim().is_empty() { "无" } else { &inline },
         summary_only = if summary_only.trim().is_empty() {
-            "None"
+            "无"
         } else {
             &summary_only
         },
         unplaced = if unplaced.trim().is_empty() {
-            "None"
+            "无"
         } else {
             &unplaced
         },
         observations = if observations.trim().is_empty() {
-            "None"
+            "无"
         } else {
             &observations
         },
@@ -3221,9 +3212,13 @@ fn sanitize_final_report(report: &str) -> String {
             !trimmed.starts_with("<!-- astrcode-auto-review")
                 && trimmed != AGENT_LINE
                 && !trimmed.starts_with("Review session:")
+                && !trimmed.starts_with("审查会话：")
                 && !trimmed.starts_with("Trigger:")
                 && !trimmed.starts_with("Trigger comment:")
+                && !trimmed.starts_with("触发：")
+                && !trimmed.starts_with("触发评论：")
                 && !trimmed.starts_with("Head SHA:")
+                && !trimmed.starts_with("Head SHA：")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -3251,24 +3246,24 @@ fn final_review_comment_body(
     let inline_line = if published.inline_comments_posted > 0 {
         match (published.inline_review_id, published.inline_review_url.as_deref()) {
             (Some(id), Some(url)) => {
-                format!("内联评论已发布 (ID {id}，[查看 review]({url}))。以下是我的总结。")
+                format!("行内评论已发布（ID {id}，[查看审查]({url})）。以下是我的总结。")
             },
-            (Some(id), None) => format!("内联评论已发布 (ID {id})。以下是我的总结。"),
-            (None, Some(url)) => format!("内联评论已发布（[查看 review]({url})）。以下是我的总结。"),
-            (None, None) => "内联评论已发布。以下是我的总结。".into(),
+            (Some(id), None) => format!("行内评论已发布（ID {id}）。以下是我的总结。"),
+            (None, Some(url)) => format!("行内评论已发布（[查看审查]({url})）。以下是我的总结。"),
+            (None, None) => "行内评论已发布。以下是我的总结。".into(),
         }
     } else if published.unplaced_findings_count > 0 {
-        "没有成功发布 inline 评论；相关发现已放入总结。以下是我的总结。".into()
+        "没有成功发布行内评论；相关发现已放入总结。以下是我的总结。".into()
     } else {
-        "未发现需要发布的 inline 评论。以下是我的总结。".into()
+        "未发现需要发布的行内评论。以下是我的总结。".into()
     };
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-Review session: `{session_id}`
+审查会话：`{session_id}`
 {trigger_line}
-Head SHA: `{sha}`
+Head SHA：`{sha}`
 
 {inline_line}
 
@@ -3420,7 +3415,7 @@ fn fallback_final_report(
 
 ## 范围
 
-本次 review 覆盖了当前 PR diff，并按 Correctness、Security、Reliability/Performance、Tests/API Contract 四个角度检查。
+本次审查覆盖了当前 PR diff，并按 Correctness、Security、Reliability/Performance、Tests/API Contract 四个角度检查。
 
 ## 验证
 
@@ -3444,18 +3439,18 @@ fn fallback_final_report(
 
 ## 做了什么
 
-完成 coverage-first 审查并发布 {inline_count} 条 inline comment；未能 inline 的发现数为 {unplaced_count}。
+完成覆盖优先审查并发布 {inline_count} 条行内评论；未能定位到 diff 行的发现数为 {unplaced_count}。
 
 ## 下一步建议
 
-1. 优先处理 inline comment 中的 P0/P1/P2 问题。
-2. 如果需要风格或 nitpick 级别 review，可以评论 `@whatevertogo nitpick review` 重新触发。
+1. 优先处理行内评论中的 P0/P1/P2 问题。
+2. 如果需要风格或细节审查，可以评论 `@whatevertogo nitpick review` 重新触发。
 
 ## 剩余风险
 
 {residual}
 
-## Coverage
+## 覆盖范围
 
 {coverage}{generation_note}"#,
         verification = verification,
@@ -3544,11 +3539,11 @@ fn validate_review_output(
 
     let mut residual_risk = output.residual_risk.clone();
     if context.truncated {
-        residual_risk.push("Review context was truncated by the plugin byte cap.".into());
+        residual_risk.push("审查上下文被插件字节上限截断。".into());
     }
     if !context.non_commentable_files.is_empty() {
         residual_risk.push(format!(
-            "Some files had no GitHub patch and cannot receive inline comments: {}",
+            "部分文件没有 GitHub patch，无法发布行内评论：{}",
             context.non_commentable_files.join(", ")
         ));
     }
@@ -4052,21 +4047,21 @@ fn inline_review_batch_body(
     highest_risk: Option<&str>,
 ) -> String {
     let trigger_line = match trigger.comment() {
-        Some(comment) => format!("Trigger comment: `{}`", comment.id),
-        None => "Trigger: new PR auto review".into(),
+        Some(comment) => format!("触发评论：`{}`", comment.id),
+        None => "触发：新 PR 自动审查".into(),
     };
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-Review session: `{session_id}`
+审查会话：`{session_id}`
 {trigger_line}
-Head SHA: `{sha}`
+Head SHA：`{sha}`
 
-已发布 {inline_comments_posted} 条 inline review comment。最终总结将作为单独评论发布。
+已发布 {inline_comments_posted} 条行内审查评论。最终总结将作为单独评论发布。
 
-- Highest risk: {highest_risk}
-- Unplaced findings so far: {unplaced_count}
+- 最高风险：{highest_risk}
+- 暂无法定位的发现：{unplaced_count}
 "#,
         marker = config.comment_marker,
         AGENT_LINE = AGENT_LINE,
@@ -4074,7 +4069,7 @@ Head SHA: `{sha}`
         trigger_line = trigger_line,
         sha = trigger.pr.head_ref_oid,
         inline_comments_posted = inline_comments_posted,
-        highest_risk = highest_risk.unwrap_or("None"),
+        highest_risk = highest_risk.unwrap_or("无"),
         unplaced_count = unplaced_count,
     )
 }
@@ -4086,20 +4081,20 @@ fn inline_review_single_fallback_body(
     finding: &ValidatedFinding,
 ) -> String {
     let trigger_line = match trigger.comment() {
-        Some(comment) => format!("Trigger comment: `{}`", comment.id),
-        None => "Trigger: new PR auto review".into(),
+        Some(comment) => format!("触发评论：`{}`", comment.id),
+        None => "触发：新 PR 自动审查".into(),
     };
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-Review session: `{session_id}`
+审查会话：`{session_id}`
 {trigger_line}
-Head SHA: `{sha}`
+Head SHA：`{sha}`
 
-批量 GitHub Review payload 被拒绝，正在降级为逐条 inline 发布。
+批量 GitHub Review 请求被拒绝，正在降级为逐条发布行内评论。
 
-- Finding: [{priority}] {title}
+- 发现：[{priority}] {title}
 "#,
         marker = config.comment_marker,
         AGENT_LINE = AGENT_LINE,
@@ -4175,14 +4170,14 @@ fn inline_review_comment_body(config: &Config, finding: &ValidatedFinding) -> St
         r#"{marker}
 {AGENT_LINE}
 
-[{priority}][{kind}][{confidence} confidence] {title}
+[{priority}][{kind}][{confidence} 置信度] {title}
 
-Category: {category}
-Evidence: {evidence}
-Issue: {issue}
-Project context: {project_context}
-Impact: {impact}
-Fix: {fix}
+类别：{category}
+证据：{evidence}
+问题：{issue}
+项目上下文：{project_context}
+影响：{impact}
+修复建议：{fix}
 "#,
         marker = config.comment_marker,
         AGENT_LINE = AGENT_LINE,
@@ -4212,11 +4207,11 @@ struct StructuredReviewSummary<'a> {
 
 fn structured_review_summary_body(summary: &StructuredReviewSummary<'_>) -> String {
     let trigger_line = match summary.trigger.comment() {
-        Some(comment) => format!("Trigger comment: `{}`", comment.id),
-        None => "Trigger: new PR auto review".into(),
+        Some(comment) => format!("触发评论：`{}`", comment.id),
+        None => "触发：新 PR 自动审查".into(),
     };
     let unplaced = if summary.validated.unplaced_findings.is_empty() {
-        "None".into()
+        "无".into()
     } else {
         summary
             .validated
@@ -4248,7 +4243,7 @@ fn structured_review_summary_body(summary: &StructuredReviewSummary<'_>) -> Stri
         residual.push(format!("- {error}"));
     }
     let residual = if residual.is_empty() {
-        "- None".into()
+        "- 无".into()
     } else {
         residual.join("\n")
     };
@@ -4257,33 +4252,33 @@ fn structured_review_summary_body(summary: &StructuredReviewSummary<'_>) -> Stri
         .summary
         .as_deref()
         .filter(|body_summary| !body_summary.trim().is_empty())
-        .unwrap_or("Structured PR review completed.");
+        .unwrap_or("已完成结构化 PR 审查。");
     let coverage_summary = coverage_summary_for_comment(summary.validated.coverage.as_ref());
     format!(
         r#"{marker}
 {AGENT_LINE}
 
-Review session: `{session_id}`
+审查会话：`{session_id}`
 {trigger_line}
-Head SHA: `{sha}`
+Head SHA：`{sha}`
 
 {summary}
 
-## Findings
-- Inline comments posted: {inline_comments_posted}
-- Highest risk: {highest_risk}
-- Unplaced findings: {unplaced_count}
+## 审查发现
+- 已发布行内评论：{inline_comments_posted}
+- 最高风险：{highest_risk}
+- 暂无法定位的发现：{unplaced_count}
 
-## Coverage
+## 覆盖范围
 {coverage_summary}
 
-## Unplaced Findings
+## 无法定位到 diff 行的发现
 {unplaced}
 
-## Verification
+## 验证
 {verification}
 
-## Residual Risk
+## 剩余风险
 {residual}
 "#,
         marker = summary.config.comment_marker,
@@ -4293,7 +4288,7 @@ Head SHA: `{sha}`
         sha = summary.trigger.pr.head_ref_oid,
         summary = body_summary,
         inline_comments_posted = summary.inline_comments_posted,
-        highest_risk = summary.highest_risk.unwrap_or("None"),
+        highest_risk = summary.highest_risk.unwrap_or("无"),
         unplaced_count = summary.unplaced_count,
         coverage_summary = coverage_summary,
         unplaced = unplaced,
@@ -4304,7 +4299,7 @@ Head SHA: `{sha}`
 
 fn verification_summary(items: &[VerificationItem]) -> String {
     if items.is_empty() {
-        return "- Plugin-collected GitHub PR context: passed".into();
+        return "- 插件收集的 GitHub PR 上下文：通过".into();
     }
     let passed = items
         .iter()
@@ -4316,19 +4311,19 @@ fn verification_summary(items: &[VerificationItem]) -> String {
         .map(|item| {
             format!(
                 "- `{}`: {} ({})",
-                item.command.as_deref().unwrap_or("unspecified"),
-                item.status.as_deref().unwrap_or("unknown"),
-                item.notes.as_deref().unwrap_or("no notes")
+                item.command.as_deref().unwrap_or("未指定"),
+                item.status.as_deref().unwrap_or("未知"),
+                item.notes.as_deref().unwrap_or("无备注")
             )
         })
         .collect::<Vec<_>>();
     if noteworthy.is_empty() {
-        format!("- {passed} deterministic check(s) passed")
+        format!("- {passed} 项确定性检查通过")
     } else if passed == 0 {
         noteworthy.join("\n")
     } else {
         format!(
-            "- {passed} deterministic check(s) passed\n{}",
+            "- {passed} 项确定性检查通过\n{}",
             noteworthy.join("\n")
         )
     }
@@ -4336,12 +4331,12 @@ fn verification_summary(items: &[VerificationItem]) -> String {
 
 fn coverage_summary_for_comment(coverage: Option<&ReviewCoverage>) -> String {
     let Some(coverage) = coverage else {
-        return "- Coverage details unavailable".into();
+        return "- 暂无覆盖范围详情".into();
     };
     let incomplete = coverage.incomplete_entries();
     if incomplete.is_empty() {
         return format!(
-            "- Files reviewed: {}/{}",
+            "- 已审查文件：{}/{}",
             coverage.reviewed_count(),
             coverage.total_count()
         );
@@ -4360,7 +4355,7 @@ fn coverage_summary_for_comment(coverage: Option<&ReviewCoverage>) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "- Files reviewed: {}/{}\n{}",
+        "- 已审查文件：{}/{}\n{}",
         coverage.reviewed_count(),
         coverage.total_count(),
         details
@@ -4978,15 +4973,15 @@ fn summarize_review(
         || published.highest_risk.is_some()
     {
         format!(
-            "Inline comments posted: {}; unplaced findings: {}; highest risk: {}",
+            "已发布行内评论：{}；暂无法定位的发现：{}；最高风险：{}",
             published.inline_comments_posted,
             published.unplaced_findings_count,
-            published.highest_risk.as_deref().unwrap_or("None")
+            published.highest_risk.as_deref().unwrap_or("无")
         )
     } else {
         finding_summary(&published.summary_body)
     };
-    let comment_url = published.url.as_deref().unwrap_or("unknown comment URL");
+    let comment_url = published.url.as_deref().unwrap_or("未知评论链接");
     let trigger_description = match trigger.comment() {
         Some(comment) => format!(
             "{} 的评论 {}",
@@ -4994,14 +4989,14 @@ fn summarize_review(
                 .user
                 .as_ref()
                 .map(|user| user.login.as_str())
-                .unwrap_or("unknown"),
-            comment.html_url.as_deref().unwrap_or("unknown comment URL")
+                .unwrap_or("未知用户"),
+            comment.html_url.as_deref().unwrap_or("未知评论链接")
         ),
         None => "新 PR 首次发现".into(),
     };
     format!(
-        "本次审查由 {} 触发，针对 {}#{} 的 head `{}` 创建了 Astrcode session \
-         `{}`。审查结论：{}。自动化已发布 GitHub review 评论：{}。后续同 PR \
+        "本次审查由 {} 触发，针对 {}#{} 的 head `{}` 创建了 Astrcode 会话 \
+         `{}`。审查结论：{}。自动化已发布 GitHub 审查评论：{}。后续同 PR \
          审查应优先确认这些发现是否已被修复，并避免重复报告已关闭的问题。",
         trigger_description,
         trigger.repo,

@@ -301,25 +301,25 @@ mod tests {
         );
         assert!(prompt.starts_with("我是 whatevertogo 的替身。"));
         assert!(!prompt.starts_with("/reviewnow"));
-        assert!(prompt.contains("Relevant prior PR memory"));
+        assert!(prompt.contains("相关的既有 PR 记忆"));
         assert!(prompt.contains("old context"));
         assert!(prompt.contains("reused existing PR session"));
         assert!(prompt.contains("Improve storage durability."));
         assert!(prompt.contains("src/storage.rs"));
         assert!(prompt.contains("Do exactly what the trigger comment asks for."));
-        assert!(prompt.contains("tagged Markdown findings"));
+        assert!(prompt.contains("使用简体中文编写简洁 Markdown"));
         assert!(prompt.contains("内置 PR 审查规范"));
-        assert!(prompt.contains("Few-Shot"));
+        assert!(prompt.contains("示例"));
         assert!(prompt.contains("Correctness"));
         assert!(prompt.contains("Security"));
         assert!(prompt.contains("Reliability/Performance"));
         assert!(prompt.contains("Tests/API Contract"));
-        assert!(prompt.contains("Plugin-collected GitHub PR context"));
+        assert!(prompt.contains("插件收集的 GitHub PR 上下文"));
         assert!(prompt.contains("GitHub command audit"));
         assert!(prompt.contains("<finding"));
         assert!(prompt.contains("priority=\"P1\""));
         assert!(prompt.contains("do not run `gh api` to create comments"));
-        assert!(prompt.contains("the plugin validates the tags and publishes inline"));
+        assert!(prompt.contains("插件会校验标签并发布行内评论"));
         assert!(prompt.contains("The plugin posts all GitHub review comments"));
         assert!(prompt.contains("gh pr view 7 --repo whatevertogo/astrcodey"));
         assert!(prompt.contains("rg -n"));
@@ -343,7 +343,7 @@ mod tests {
         let config = test_config(tmp.path());
         let paths = memory_paths(&config, &trigger.repo, trigger.pr.number);
         let prompt = review_prompt(&trigger, tmp.path(), "", &paths, true, None);
-        assert!(prompt.contains("Do not force a code review"));
+        assert!(prompt.contains("不要强行进行代码审查"));
         assert!(prompt.contains("本 trigger 不是 review 任务"));
     }
 
@@ -357,12 +357,12 @@ mod tests {
         let prompt = review_prompt(&trigger, tmp.path(), "", &paths, false, Some(&context));
 
         assert!(prompt.starts_with("我是 whatevertogo 的替身。"));
-        assert!(prompt.contains("Trigger type: new_pull_request"));
+        assert!(prompt.contains("触发类型：new_pull_request"));
         assert!(prompt.contains("这是新 PR 首次发现自动 review"));
-        assert!(prompt.contains("tagged Markdown findings"));
+        assert!(prompt.contains("返回带标签的 Markdown 发现"));
         assert!(prompt.contains("内置 PR 审查规范"));
-        assert!(prompt.contains("Few-Shot"));
-        assert!(prompt.contains("Plugin-collected GitHub PR context"));
+        assert!(prompt.contains("示例"));
+        assert!(prompt.contains("插件收集的 GitHub PR 上下文"));
         assert!(prompt.contains("<finding"));
         assert!(!prompt.contains("gh api repos/{repo}/pulls/{pr}/comments"));
         assert!(!prompt.contains("Please use the reviewnow skill"));
@@ -387,7 +387,7 @@ mod tests {
         assert!(prompt.contains("PR 定向分析 Pass"));
         assert!(prompt.contains("Repository PR/Issue relation reminders"));
         assert!(prompt.contains("PR #620 affects storage"));
-        assert!(prompt.contains("Plugin-collected PR context"));
+        assert!(prompt.contains("插件收集的 PR 上下文"));
         assert!(prompt.contains("src/storage.rs"));
         assert!(!prompt.contains("GitHub command audit"));
         assert!(prompt.contains("内置标签协议"));
@@ -788,13 +788,14 @@ One concrete finding and one repo-history reminder.
         assert!(
             comment_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。")
         );
-        assert!(comment_body
-            .contains("[P1][Confirmed][high confidence] Persist storage before returning"));
-        assert!(comment_body.contains("Impact: A crash can lose user data."));
-        assert!(comment_body.contains("Fix: Persist first, then return success."));
-        assert!(body.contains("Inline comments posted: 1"));
-        assert!(body.contains("Unplaced findings: 0"));
-        assert!(body.contains("Files reviewed: 1/1"));
+        assert!(
+            comment_body.contains("[P1][Confirmed][high 置信度] Persist storage before returning")
+        );
+        assert!(comment_body.contains("影响：A crash can lose user data."));
+        assert!(comment_body.contains("修复建议：Persist first, then return success."));
+        assert!(body.contains("已发布行内评论：1"));
+        assert!(body.contains("暂无法定位的发现：0"));
+        assert!(body.contains("已审查文件：1/1"));
     }
 
     #[test]
@@ -970,18 +971,18 @@ One concrete finding and one repo-history reminder.
 
         let start_body = auto_review_start_comment_body(&config, &trigger);
         assert!(start_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。"));
-        assert!(start_body.contains("已启动自动 review"));
+        assert!(start_body.contains("已启动自动审查"));
 
         let final_body = review_comment_body(&config, &trigger, "s1", "No issues.");
         assert!(final_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。"));
-        assert!(final_body.contains("Trigger: new PR auto review"));
+        assert!(final_body.contains("触发：新 PR 自动审查"));
 
         let failure_body = auto_review_failure_comment_body(&config, &trigger, "timeout");
         assert!(
             failure_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。")
         );
-        assert!(failure_body.contains("PR review 失败"));
-        assert!(failure_body.contains("Trigger: new PR auto review"));
+        assert!(failure_body.contains("PR 审查失败"));
+        assert!(failure_body.contains("触发：新 PR 自动审查"));
         assert!(failure_body.contains("@whatevertogo review it"));
     }
 
@@ -1012,9 +1013,23 @@ One concrete finding and one repo-history reminder.
             pr: pr(),
             kind: ReviewTriggerKind::MentionComment(comment(42, "@whatevertogo review this")),
         };
-        let body = review_comment_body(&config, &trigger, "s1", "Looks good.");
+        let body = review_comment_body(&config, &trigger, "s1", "没有发现需要处理的问题。");
         assert!(body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。"));
-        assert!(body.contains("Review session: `s1`"));
+        assert!(body.contains("审查会话：`s1`"));
+    }
+
+    #[test]
+    fn inline_comment_body_uses_chinese_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let body =
+            inline_review_comment_body(&config, &validated_finding("P2", "持久化顺序错误", 10));
+
+        assert!(body.contains("类别：Correctness"));
+        assert!(body.contains("证据："));
+        assert!(body.contains("问题："));
+        assert!(body.contains("修复建议："));
+        assert!(!body.contains("Category:"));
     }
 
     #[test]
@@ -1037,7 +1052,7 @@ One concrete finding and one repo-history reminder.
         };
         let summary = summarize_review(&trigger, "s1", &published);
         assert!(summary.contains("[P1] Fix the storage race"));
-        assert!(summary.contains("session `s1`"));
+        assert!(summary.contains("会话 `s1`"));
     }
 
     #[test]

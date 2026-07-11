@@ -4,6 +4,8 @@
 
 输出简洁 Markdown。每个可执行问题必须用 `<finding ...>...</finding>` 包起来；已检查文件必须写进 `<files_reviewed>`。插件会提取标签并发布 inline comments。
 
+除协议属性值、代码、路径和命令外，所有自然语言字段必须用简体中文书写。
+
 规则：
 - 检查 shard 中每个文件，并把路径列入 `<files_reviewed>`。
 - 使用 worktree，不要只看 patch。证据需要时可追踪调用点、测试、配置、schema、hook、生命周期、文档、CI 和相关符号。
