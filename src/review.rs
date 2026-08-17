@@ -642,7 +642,7 @@ async fn submit_review_pass(
         &format!("{label}-response.json"),
         &serde_json::to_string_pretty(&output).unwrap_or_default(),
     );
-    if let Some(staging) = staging.as_deref_mut() {
+    if let Some(staging) = staging {
         staging.append(label, &output)?;
     }
     Ok(output)
@@ -3878,7 +3878,7 @@ where
                 .map(|finding| finding_memory_from_validated(finding, &trigger.pr.head_ref_oid))
                 .collect();
             result.inline_findings = inline_findings;
-            return result;
+            result
         },
         Err(batch_error) => {
             let batch_error_text =
@@ -4367,7 +4367,6 @@ async fn create_session(run_info: &RunInfo, working_dir: &Path) -> Result<String
     let response = curl_json(
         "POST",
         &url,
-        &run_info.auth_token,
         Some(&json!({ "workingDir": path_str(working_dir)? })),
     )?;
     response
@@ -4382,7 +4381,7 @@ fn delete_session(run_info: &RunInfo, session_id: &str) -> Result<()> {
         "http://127.0.0.1:{}/api/sessions/{session_id}",
         run_info.port
     );
-    let _ = curl_json("DELETE", &url, &run_info.auth_token, None)?;
+    let _ = curl_json("DELETE", &url, None)?;
     Ok(())
 }
 
@@ -4394,7 +4393,6 @@ async fn submit_prompt(run_info: &RunInfo, session_id: &str, prompt: &str) -> Re
     let _ = curl_json(
         "POST",
         &url,
-        &run_info.auth_token,
         Some(&json!({ "text": prompt, "attachments": [] })),
     )?;
     Ok(())
@@ -4425,8 +4423,10 @@ async fn wait_for_review_after_count(
     let mut idle_without_assistant_since: Option<std::time::Instant> = None;
     while std::time::Instant::now() < deadline {
         let snapshot = conversation_snapshot(run_info, session_id).await?;
+        // s5r-3.0 宿主快照把 phase 挪进了 control（顶层 phase 字段已移除）。
         last_phase = snapshot
-            .get("phase")
+            .get("control")
+            .and_then(|control| control.get("phase"))
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
@@ -4467,7 +4467,7 @@ async fn conversation_snapshot(run_info: &RunInfo, session_id: &str) -> Result<V
         "http://127.0.0.1:{}/api/sessions/{session_id}/conversation",
         run_info.port
     );
-    curl_json("GET", &url, &run_info.auth_token, None)
+    curl_json("GET", &url, None)
 }
 
 fn latest_session_error_message(session_id: &str) -> Option<String> {
@@ -4512,17 +4512,15 @@ fn latest_error_from_session_log(path: &Path) -> Option<String> {
                         .to_owned()
                 })
         })
-        .last()
+        .next_back()
 }
 
-fn curl_json(method: &str, url: &str, token: &str, payload: Option<&Value>) -> Result<Value> {
+fn curl_json(method: &str, url: &str, payload: Option<&Value>) -> Result<Value> {
     let mut payload_file = None;
     let mut args = vec![
         "-fsS".to_string(),
         "-X".to_string(),
         method.to_string(),
-        "-H".to_string(),
-        format!("Authorization: Bearer {token}"),
     ];
     if let Some(payload) = payload {
         let mut file = tempfile::NamedTempFile::new()?;

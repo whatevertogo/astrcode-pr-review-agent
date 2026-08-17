@@ -1,6 +1,7 @@
 {
+  "extension_id": "astrcode-pr-review-agent",
   "protocol": {
-    "s5r": "1.0"
+    "s5r": "3.0"
   },
   "command": [
     "./astrcode-pr-review-agent",

@@ -1,8 +1,8 @@
 use anyhow::Result;
-use astrcode_extension_sdk::{
-    builder::tool,
-    s5r::ErrorPayload,
-    worker_prelude::{command_handler, tool_handler, tool_text, HandlerResult, Worker},
+use astrcode_extension_sdk::WireErrorCode;
+use astrcode_extension_worker::worker_prelude::{
+    command, command_handler, tool, tool_handler, tool_planner, tool_text, ErrorPayload,
+    ExtensionCommandResult, HandlerEffect, HandlerResult, ToolPlan, Worker,
 };
 use astrcode_pr_review_agent::{
     poll_forever, poll_once, spawn_webhook_server, status_text, Config,
@@ -10,6 +10,8 @@ use astrcode_pr_review_agent::{
 use serde_json::json;
 
 const EXT_ID: &str = "astrcode-pr-review-agent";
+/// Set to skip starting the GitHub poll loop on activation (conformance probes, tests).
+const DISABLE_POLL_ENV: &str = "ASTRCODE_PR_REVIEW_AGENT_DISABLE_POLL";
 
 #[tokio::main]
 async fn main() {
@@ -42,23 +44,29 @@ async fn run() -> Result<()> {
 }
 
 async fn run_s5r() -> std::result::Result<(), ErrorPayload> {
-    let mut worker = Worker::new(EXT_ID).version(env!("CARGO_PKG_VERSION"));
-    let poll_config = Config::load_or_create().map_err(|error| {
-        ErrorPayload::new(
-            "config_load_failed",
-            format!("load pr review agent config: {error:#}"),
-        )
-    })?;
-    if poll_config.webhook_enabled {
-        spawn_webhook_server(poll_config.clone()).map_err(|error| {
+    let mut worker = Worker::new(EXT_ID, env!("CARGO_PKG_VERSION"));
+
+    worker.on_activate(|_config| async move {
+        let poll_config = Config::load_or_create().map_err(|error| {
             ErrorPayload::new(
-                "webhook_start_failed",
-                format!("start pr review agent webhook receiver: {error:#}"),
+                WireErrorCode::InvalidInput,
+                format!("load pr review agent config: {error:#}"),
             )
         })?;
-    }
-    tokio::spawn(async move {
-        poll_forever(poll_config).await;
+        if poll_config.webhook_enabled {
+            spawn_webhook_server(poll_config.clone()).map_err(|error| {
+                ErrorPayload::new(
+                    WireErrorCode::BackendUnavailable,
+                    format!("start pr review agent webhook receiver: {error:#}"),
+                )
+            })?;
+        }
+        if std::env::var_os(DISABLE_POLL_ENV).is_none() {
+            tokio::spawn(async move {
+                poll_forever(poll_config).await;
+            });
+        }
+        Ok(())
     });
 
     worker.tool(
@@ -66,6 +74,7 @@ async fn run_s5r() -> std::result::Result<(), ErrorPayload> {
             .description("Show GitHub PR review agent status")
             .parameters(json!({ "type": "object", "properties": {} }))
             .build(),
+        tool_planner(|_ctx| async { Ok(ToolPlan::default()) }),
         tool_handler(|_ctx| async move {
             let text = status_text_for_worker();
             Ok(tool_text(text, false))
@@ -73,18 +82,20 @@ async fn run_s5r() -> std::result::Result<(), ErrorPayload> {
     )?;
 
     worker.command(
-        "pr-review-agent",
-        "Show GitHub PR review agent status",
+        command("pr-review-agent")
+            .description("Show GitHub PR review agent status")
+            .build(),
         command_handler(|_ctx| async move {
             let text = status_text_for_worker();
-            Ok(HandlerResult::effect(
-                "ok",
-                json!({
-                    "kind": "display",
-                    "content": text,
-                    "is_error": false
-                }),
-            ))
+            let data = serde_json::to_value(ExtensionCommandResult::display(text, false)).map_err(
+                |error| {
+                    ErrorPayload::new(
+                        WireErrorCode::SerializationFailed,
+                        format!("serialize pr-review-agent command result: {error}"),
+                    )
+                },
+            )?;
+            Ok(HandlerResult::effect(HandlerEffect::Ok, data))
         }),
     )?;
 

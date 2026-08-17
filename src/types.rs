@@ -902,5 +902,4 @@ struct PromptMemoryPaths {
 #[serde(rename_all = "camelCase")]
 struct RunInfo {
     port: u16,
-    auth_token: String,
 }
