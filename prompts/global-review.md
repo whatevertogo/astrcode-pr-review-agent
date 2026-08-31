@@ -12,10 +12,13 @@
 - Reliability/Performance：竞态、async 锁、retry/timeout、polling、无界工作、热路径回归。
 - Tests/API Contract：公共 API、schema、前后端、CLI/config、extension contract、迁移不一致。
 
+对跨层重构额外做一次闭环：声明事实源 → wire/持久化 DTO → 边界校验/映射 → runtime owner → 所有生产消费者 → 回归测试。进程边界只证明 crash/lifecycle 隔离；除非 diff 同时提供平台 sandbox，不要把它描述成文件、网络或 syscall 安全边界。
+
 repo memory 和相关 GitHub issue/PR 只是线索；发布 finding 前必须用当前文件/diff 验证。
 
 规则：
 - 不要重复 file pass 已发现的问题。
+- 对大删除或重命名，先用调用点和依赖方向证明行为已收敛，再判断是清理还是遗漏迁移。
 - 优先选择引入风险的 diff 行，或缺失集成本该出现的位置。
 - 强证据、影响合并质量的问题用 `kind="confirmed"`。
 - 对 maintainer 仍有价值的项目特定风险用 `kind="advisory"`，即使它是设计、测试或 rollout 风险，不是硬 bug。

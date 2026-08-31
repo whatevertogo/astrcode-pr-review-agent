@@ -8,6 +8,7 @@
 - 不要发明新 finding。
 - 只保留已出现在输入中的 finding。
 - 删除描述同一根因的重复 finding。
+- 只把当前 diff 引入或新近可达的问题保留为 finding；纯粹既有问题降为 observation，并写明不是本 PR 引入。
 - 重复项严重度不一致时保留最高严重度。
 - 不要因为 finding 是 advisory 或 medium-confidence 就把 P1/P2 降级。
 - 标题和修复建议要精准、可执行。

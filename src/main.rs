@@ -1,8 +1,7 @@
 use anyhow::Result;
-use astrcode_extension_sdk::WireErrorCode;
 use astrcode_extension_worker::worker_prelude::{
     command, command_handler, tool, tool_handler, tool_planner, tool_text, ErrorPayload,
-    ExtensionCommandResult, HandlerEffect, HandlerResult, ToolPlan, Worker,
+    ExtensionCommandResult, HandlerEffect, HandlerResult, ToolPlan, WireErrorCode, Worker,
 };
 use astrcode_pr_review_agent::{
     poll_forever, poll_once, spawn_webhook_server, status_text, Config,

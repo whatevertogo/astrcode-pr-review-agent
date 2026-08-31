@@ -982,8 +982,70 @@ One concrete finding and one repo-history reminder.
             failure_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。")
         );
         assert!(failure_body.contains("PR 审查失败"));
+        assert!(failure_body.contains("本次任务已停止"));
         assert!(failure_body.contains("触发：新 PR 自动审查"));
         assert!(failure_body.contains("@whatevertogo review it"));
+    }
+
+    #[test]
+    fn checkout_retry_recovers_transient_failures_and_reports_exhaustion() {
+        let mut recovery_attempts = 0;
+        let value = retry_operation("checkout", 3, Duration::ZERO, || {
+            recovery_attempts += 1;
+            if recovery_attempts < 3 {
+                anyhow::bail!("temporary network failure");
+            }
+            Ok("ready")
+        })
+        .unwrap();
+
+        assert_eq!(value, "ready");
+        assert_eq!(recovery_attempts, 3);
+
+        let mut failed_attempts = 0;
+        let error = retry_operation::<()>("checkout", 3, Duration::ZERO, || {
+            failed_attempts += 1;
+            anyhow::bail!("network unavailable")
+        })
+        .unwrap_err();
+
+        assert_eq!(failed_attempts, 3);
+        assert!(error
+            .to_string()
+            .contains("checkout failed after 3 attempts"));
+    }
+
+    #[test]
+    fn cargo_check_scope_targets_changed_crates_and_expands_for_workspace_inputs() {
+        let metadata = CargoMetadata {
+            workspace_root: "/repo".into(),
+            packages: vec![
+                CargoMetadataPackage {
+                    name: "alpha".into(),
+                    manifest_path: "/repo/crates/alpha/Cargo.toml".into(),
+                },
+                CargoMetadataPackage {
+                    name: "beta".into(),
+                    manifest_path: "/repo/crates/beta/Cargo.toml".into(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            select_cargo_check_scope(
+                &metadata,
+                &[
+                    "crates/beta/tests/behavior.rs".into(),
+                    "crates/alpha/src/lib.rs".into(),
+                ],
+            ),
+            CargoCheckScope::Packages(vec!["alpha".into(), "beta".into()])
+        );
+        assert_eq!(
+            select_cargo_check_scope(&metadata, &["crates/alpha/Cargo.toml".into()]),
+            CargoCheckScope::Workspace
+        );
+        assert!(!rust_verification_path("docs/review.md"));
     }
 
     #[test]

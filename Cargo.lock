@@ -20,7 +20,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 [[package]]
 name = "astrcode-core"
 version = "0.3.15"
-source = "git+https://github.com/whatevertogo/astrcodey?rev=2834d48b#2834d48b005abb3368ea24c3c12b41c36d264f86"
+source = "git+https://github.com/whatevertogo/astrcodey?rev=f898d51f#f898d51f2f9f14a7d6b88193d7eb5b3429cfb6d6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -37,7 +37,7 @@ dependencies = [
 [[package]]
 name = "astrcode-extension-sdk"
 version = "0.3.15"
-source = "git+https://github.com/whatevertogo/astrcodey?rev=2834d48b#2834d48b005abb3368ea24c3c12b41c36d264f86"
+source = "git+https://github.com/whatevertogo/astrcodey?rev=f898d51f#f898d51f2f9f14a7d6b88193d7eb5b3429cfb6d6"
 dependencies = [
  "astrcode-core",
  "async-trait",
@@ -57,7 +57,7 @@ dependencies = [
 [[package]]
 name = "astrcode-extension-worker"
 version = "0.3.15"
-source = "git+https://github.com/whatevertogo/astrcodey?rev=2834d48b#2834d48b005abb3368ea24c3c12b41c36d264f86"
+source = "git+https://github.com/whatevertogo/astrcodey?rev=f898d51f#f898d51f2f9f14a7d6b88193d7eb5b3429cfb6d6"
 dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
@@ -73,7 +73,6 @@ name = "astrcode-pr-review-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "astrcode-extension-sdk",
  "astrcode-extension-worker",
  "fs2",
  "hmac",

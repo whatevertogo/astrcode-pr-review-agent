@@ -12,8 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-astrcode-extension-sdk = { git = "https://github.com/whatevertogo/astrcodey", rev = "2834d48b" }
-astrcode-extension-worker = { git = "https://github.com/whatevertogo/astrcodey", rev = "2834d48b" }
+astrcode-extension-worker = { git = "https://github.com/whatevertogo/astrcodey", rev = "f898d51f" }
 fs2 = "0.4"
 hmac = "0.12"
 serde = { version = "1", features = ["derive"] }

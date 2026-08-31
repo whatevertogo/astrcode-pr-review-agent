@@ -54,7 +54,8 @@ cp extension.json ~/.astrcode/extensions/astrcode-pr-review-agent/
 
 ```json
 {
-  "protocol": { "s5r": "1.0" },
+  "extension_id": "astrcode-pr-review-agent",
+  "protocol": { "s5r": "3.0" },
   "command": ["./astrcode-pr-review-agent", "s5r"]
 }
 ```
@@ -127,6 +128,20 @@ advisory limits higher:
 
 Memory records session IDs, reviewed ranges, posted finding fingerprints,
 summary observations, and final review URLs.
+
+Repository checkout keeps one shared bare repo cache per configured GitHub repo,
+fetches only the PR and its base branch, then creates lightweight PR worktrees
+from that cache. Checkout commands retry transient failures up to three times
+and have a 600-second timeout by default. Set
+`ASTRCODE_PR_REVIEW_AGENT_CHECKOUT_COMMAND_TIMEOUT_SECONDS` to at least 30 to
+override that timeout for unusual networks.
+
+Deterministic Rust verification targets only crates containing changed Rust
+files by default. Cargo manifest/lock/toolchain changes, changes spanning more
+than four crates, or an explicit full-test trigger expand verification to the workspace.
+The review passes still inspect cross-crate consumers independently of this
+build scope; a passing targeted check is evidence, not proof that the whole PR
+is correct.
 
 ## Development
 

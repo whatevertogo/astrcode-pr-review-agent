@@ -41,7 +41,7 @@ async fn review_trigger(
     if let Ok(details) = pr_details(&trigger.repo, trigger.pr.number) {
         trigger.pr = details;
     }
-    let worktree = checkout_pr(config, &trigger.repo, trigger.pr.number)?;
+    let worktree = checkout_pr(config, &trigger.repo, &trigger.pr)?;
     let mut memory = relevant_memory(config, &trigger.repo, trigger.pr.number)?;
     let related_context = related_github_context(&trigger)
         .unwrap_or_else(|error| format!("related GitHub context unavailable: {error:#}"));
@@ -1409,13 +1409,11 @@ fn deterministic_review_verification(
         "no whitespace or conflict-marker errors",
     )];
     if worktree.join("Cargo.toml").exists() {
-        checks.push(run_verification_command(
-            "cargo check --workspace --all-targets",
-            "cargo",
-            &["check", "--workspace", "--all-targets"],
-            worktree,
-            "cargo check passed",
-        ));
+        match cargo_check_scope(trigger, worktree) {
+            Ok(Some(scope)) => checks.push(run_cargo_check(scope, worktree)),
+            Ok(None) => {},
+            Err(error) => checks.push(verification_error("cargo metadata --no-deps", error)),
+        }
         if should_run_full_tests(trigger, config) {
             checks.push(run_verification_command(
                 "cargo test --workspace",
@@ -1454,6 +1452,138 @@ fn deterministic_review_verification(
     checks
 }
 
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    workspace_root: String,
+    packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataPackage {
+    name: String,
+    manifest_path: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CargoCheckScope {
+    Workspace,
+    Packages(Vec<String>),
+}
+
+fn cargo_check_scope(trigger: &ReviewTrigger, worktree: &Path) -> Result<Option<CargoCheckScope>> {
+    let changed_paths = trigger
+        .pr
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    if !changed_paths.iter().any(|path| rust_verification_path(path)) {
+        return Ok(None);
+    }
+    let output = run_command(
+        "cargo",
+        &["metadata", "--no-deps", "--format-version", "1"],
+        Some(worktree),
+    )?;
+    let metadata: CargoMetadata = serde_json::from_str(&output).context("parse cargo metadata")?;
+    Ok(Some(select_cargo_check_scope(&metadata, &changed_paths)))
+}
+
+fn select_cargo_check_scope(
+    metadata: &CargoMetadata,
+    changed_paths: &[String],
+) -> CargoCheckScope {
+    const MAX_TARGETED_PACKAGES: usize = 4;
+
+    let workspace_root = Path::new(&metadata.workspace_root);
+    let mut packages = BTreeSet::new();
+    for changed in changed_paths
+        .iter()
+        .filter(|path| rust_verification_path(path))
+    {
+        if workspace_wide_rust_path(changed) {
+            return CargoCheckScope::Workspace;
+        }
+        let absolute = workspace_root.join(changed);
+        if !absolute.starts_with(workspace_root) {
+            return CargoCheckScope::Workspace;
+        }
+        let package = metadata
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let root = Path::new(&package.manifest_path).parent()?;
+                absolute.starts_with(root).then_some((root, &package.name))
+            })
+            .max_by_key(|(root, _)| root.components().count())
+            .map(|(_, name)| name);
+        let Some(package) = package else {
+            return CargoCheckScope::Workspace;
+        };
+        packages.insert(package.clone());
+        if packages.len() > MAX_TARGETED_PACKAGES {
+            return CargoCheckScope::Workspace;
+        }
+    }
+    CargoCheckScope::Packages(packages.into_iter().collect())
+}
+
+fn rust_verification_path(path: &str) -> bool {
+    path.ends_with(".rs")
+        || path.ends_with("Cargo.toml")
+        || path.ends_with("Cargo.lock")
+        || path.ends_with("build.rs")
+        || path == "rust-toolchain"
+        || path == "rust-toolchain.toml"
+        || path.starts_with(".cargo/")
+}
+
+fn workspace_wide_rust_path(path: &str) -> bool {
+    path.ends_with("Cargo.toml")
+        || path.ends_with("Cargo.lock")
+        || path == "rust-toolchain"
+        || path == "rust-toolchain.toml"
+        || path.starts_with(".cargo/")
+}
+
+fn run_cargo_check(scope: CargoCheckScope, worktree: &Path) -> VerificationItem {
+    let (label, args) = match scope {
+        CargoCheckScope::Workspace => (
+            "cargo check --workspace --all-targets".to_owned(),
+            vec!["check".to_owned(), "--workspace".to_owned(), "--all-targets".to_owned()],
+        ),
+        CargoCheckScope::Packages(packages) => {
+            let mut args = vec!["check".to_owned(), "--all-targets".to_owned()];
+            for package in &packages {
+                args.push("-p".to_owned());
+                args.push(package.clone());
+            }
+            (
+                format!("cargo check changed packages ({})", packages.join(", ")),
+                args,
+            )
+        },
+    };
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_verification_command(&label, "cargo", &args, worktree, "cargo check passed")
+}
+
+fn verification_error(label: &str, error: anyhow::Error) -> VerificationItem {
+    let text = format!("{error:#}");
+    VerificationItem {
+        command: Some(label.into()),
+        status: Some(
+            if is_environment_tooling_failure(&text) {
+                "skipped"
+            } else {
+                "failed"
+            }
+            .into(),
+        ),
+        notes: Some(one_line(&text)),
+    }
+}
+
 fn run_verification_command(
     label: &str,
     program: &str,
@@ -1472,21 +1602,7 @@ fn run_verification_command(
             status: Some("passed".into()),
             notes: Some(one_line(&output)),
         },
-        Err(error) => {
-            let text = format!("{error:#}");
-            VerificationItem {
-                command: Some(label.into()),
-                status: Some(
-                    if is_environment_tooling_failure(&text) {
-                        "skipped"
-                    } else {
-                        "failed"
-                    }
-                    .into(),
-                ),
-                notes: Some(one_line(&text)),
-            }
-        },
+        Err(error) => verification_error(label, error),
     }
 }
 
@@ -2092,10 +2208,15 @@ fn truncate_text(text: &mut String, max_bytes: usize) -> bool {
     true
 }
 
-fn checkout_pr(config: &Config, repo: &str, pr_number: u64) -> Result<PathBuf> {
+const CHECKOUT_COMMAND_ATTEMPTS: usize = 3;
+const CHECKOUT_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+fn checkout_pr(config: &Config, repo: &str, pr: &PullRequest) -> Result<PathBuf> {
     let root = config.worktree_dir_path()?;
     fs::create_dir_all(&root)?;
-    let target = root.join(repo_key(repo)).join(format!("pr-{pr_number}"));
+    let repo_root = root.join(repo_key(repo));
+    fs::create_dir_all(&repo_root)?;
+    let target = repo_root.join(format!("pr-{}", pr.number));
     if !target.join(".git").exists() {
         if target.exists() {
             anyhow::bail!(
@@ -2103,15 +2224,175 @@ fn checkout_pr(config: &Config, repo: &str, pr_number: u64) -> Result<PathBuf> {
                 target.display()
             );
         }
-        run_command("gh", &["repo", "clone", repo, path_str(&target)?], None)?;
+        let cache = ensure_repo_cache(repo, &repo_root)?;
+        fetch_pr_refs_from_repo(&cache, pr)?;
+        create_worktree_from_cache(repo, &cache, &target, &pr.head_ref_oid)?;
     }
-    run_command("git", &["fetch", "--all", "--prune"], Some(&target))?;
-    run_command(
-        "gh",
-        &["pr", "checkout", &pr_number.to_string(), "--repo", repo],
+
+    let base_refspec = format!(
+        "+refs/heads/{base}:refs/remotes/origin/{base}",
+        base = pr.base_ref_name
+    );
+    let pr_refspec = format!(
+        "+refs/pull/{number}/head:refs/remotes/origin/pull/{number}/head",
+        number = pr.number
+    );
+    run_checkout_command(
+        "git",
+        &[
+            "fetch",
+            "--filter=blob:none",
+            "--no-tags",
+            "--prune",
+            "origin",
+            &base_refspec,
+            &pr_refspec,
+        ],
+        Some(&target),
+    )?;
+    run_checkout_command(
+        "git",
+        &["checkout", "--force", "--detach", &pr.head_ref_oid],
         Some(&target),
     )?;
     Ok(target)
+}
+
+fn repo_cache_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("repo.git")
+}
+
+fn ensure_repo_cache(repo: &str, repo_root: &Path) -> Result<PathBuf> {
+    let cache = repo_cache_path(repo_root);
+    if cache.join("HEAD").exists() {
+        return Ok(cache);
+    }
+    if cache.exists() {
+        anyhow::bail!(
+            "repo cache target exists but is not a git repo: {}",
+            cache.display()
+        );
+    }
+    clone_repo_cache(repo, repo_root, &cache)?;
+    Ok(cache)
+}
+
+fn clone_repo_cache(repo: &str, repo_root: &Path, cache: &Path) -> Result<()> {
+    let staging = tempfile::Builder::new()
+        .prefix(".repo-cache-")
+        .tempdir_in(repo_root)
+        .with_context(|| {
+            format!(
+                "create repo cache staging directory in {}",
+                repo_root.display()
+            )
+        })?;
+    let mut clone_attempt = 0;
+    let staged_cache = retry_operation(
+        &format!("clone shared repo cache for {repo}"),
+        CHECKOUT_COMMAND_ATTEMPTS,
+        CHECKOUT_RETRY_DELAY,
+        || {
+            clone_attempt += 1;
+            let staged_cache = staging.path().join(format!("attempt-{clone_attempt}.git"));
+            let staged_cache_arg = path_str(&staged_cache)?.to_owned();
+            run_command_with_timeout(
+                "gh",
+                &[
+                    "repo",
+                    "clone",
+                    repo,
+                    &staged_cache_arg,
+                    "--",
+                    "--bare",
+                    "--filter=blob:none",
+                    "--no-tags",
+                ],
+                None,
+                checkout_command_timeout(),
+            )?;
+            Ok(staged_cache)
+        },
+    )?;
+    fs::rename(&staged_cache, cache).with_context(|| {
+        format!(
+            "move completed repo cache from {} to {}",
+            staged_cache.display(),
+            cache.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn fetch_pr_refs_from_repo(repo_git_dir: &Path, pr: &PullRequest) -> Result<()> {
+    let repo_git_dir_arg = path_str(repo_git_dir)?.to_owned();
+    let base_refspec = format!(
+        "+refs/heads/{base}:refs/remotes/origin/{base}",
+        base = pr.base_ref_name
+    );
+    let pr_refspec = format!(
+        "+refs/pull/{number}/head:refs/remotes/origin/pull/{number}/head",
+        number = pr.number
+    );
+    run_checkout_command(
+        "git",
+        &[
+            "--git-dir",
+            &repo_git_dir_arg,
+            "fetch",
+            "--filter=blob:none",
+            "--no-tags",
+            "--prune",
+            "origin",
+            &base_refspec,
+            &pr_refspec,
+        ],
+        None,
+    )?;
+    Ok(())
+}
+
+fn create_worktree_from_cache(
+    repo: &str,
+    cache: &Path,
+    target: &Path,
+    head_sha: &str,
+) -> Result<()> {
+    let cache_arg = path_str(cache)?.to_owned();
+    let target_arg = path_str(target)?.to_owned();
+    retry_operation(
+        &format!("create PR worktree for {repo}"),
+        CHECKOUT_COMMAND_ATTEMPTS,
+        CHECKOUT_RETRY_DELAY,
+        || {
+            if target.exists() {
+                fs::remove_dir_all(target).with_context(|| {
+                    format!("remove incomplete worktree {}", target.display())
+                })?;
+                let _ = run_command_with_timeout(
+                    "git",
+                    &["--git-dir", &cache_arg, "worktree", "prune"],
+                    None,
+                    checkout_command_timeout(),
+                );
+            }
+            run_command_with_timeout(
+                "git",
+                &[
+                    "--git-dir",
+                    &cache_arg,
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &target_arg,
+                    head_sha,
+                ],
+                None,
+                checkout_command_timeout(),
+            )?;
+            Ok(())
+        },
+    )
 }
 
 fn configured_open_prs(config: &Config) -> Result<Vec<(String, PullRequest)>> {
@@ -2341,7 +2622,7 @@ fn auto_review_failure_comment_body(
         r#"{marker}
 {AGENT_LINE}
 
-PR 审查失败，未继续重试。
+PR 审查失败，本次任务已停止。
 
 {trigger_line}
 Head SHA：`{sha}`
@@ -4611,6 +4892,44 @@ fn run_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Strin
     run_command_with_timeout(program, args, cwd, command_timeout())
 }
 
+fn run_checkout_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    retry_operation(
+        &format!("{program} {}", args.join(" ")),
+        CHECKOUT_COMMAND_ATTEMPTS,
+        CHECKOUT_RETRY_DELAY,
+        || run_command_with_timeout(program, args, cwd, checkout_command_timeout()),
+    )
+}
+
+fn retry_operation<T>(
+    description: &str,
+    attempts: usize,
+    retry_delay: Duration,
+    mut operation: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    if attempts == 0 {
+        anyhow::bail!("{description} requires at least one attempt");
+    }
+
+    let mut attempt = 1;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt == attempts => {
+                return Err(error)
+                    .with_context(|| format!("{description} failed after {attempts} attempts"));
+            }
+            Err(error) => {
+                eprintln!(
+                    "{description} failed on attempt {attempt}/{attempts}; retrying: {error:#}"
+                );
+                std::thread::sleep(retry_delay.saturating_mul(attempt as u32));
+                attempt += 1;
+            }
+        }
+    }
+}
+
 fn run_command_with_timeout(
     program: &str,
     args: &[&str],
@@ -4674,6 +4993,15 @@ fn poll_command_timeout() -> Duration {
         .filter(|seconds| *seconds >= 5)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(12))
+}
+
+fn checkout_command_timeout() -> Duration {
+    std::env::var("ASTRCODE_PR_REVIEW_AGENT_CHECKOUT_COMMAND_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds >= 30)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(600))
 }
 
 fn command_timeout() -> Duration {
