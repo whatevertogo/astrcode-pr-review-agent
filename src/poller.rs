@@ -759,8 +759,7 @@ fn cleanup_completed_pr_worktrees(config: &Config, state: &mut State) -> Result<
             continue;
         }
 
-        fs::remove_dir_all(&worktree)
-            .with_context(|| format!("remove worktree {}", worktree.display()))?;
+        remove_pr_worktree(&worktree)?;
         let _ = remove_empty_parent(&worktree)?;
 
         cleaned += 1;
@@ -806,10 +805,7 @@ fn cleanup_completed_pr_sessions(
         }
 
         let worktree = PathBuf::from(&session.worktree);
-        if worktree.exists() {
-            fs::remove_dir_all(&worktree)
-                .with_context(|| format!("remove worktree {}", worktree.display()))?;
-        }
+        remove_pr_worktree(&worktree)?;
 
         let _ = remove_empty_parent(&worktree)?;
 
@@ -861,10 +857,7 @@ fn cleanup_completed_pr_sessions_after_delete_result(
         }
 
         let worktree = PathBuf::from(&session.worktree);
-        if worktree.exists() {
-            fs::remove_dir_all(&worktree)
-                .with_context(|| format!("remove worktree {}", worktree.display()))?;
-        }
+        remove_pr_worktree(&worktree)?;
 
         let _ = remove_empty_parent(&worktree)?;
 

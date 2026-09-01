@@ -2365,16 +2365,12 @@ fn create_worktree_from_cache(
         CHECKOUT_COMMAND_ATTEMPTS,
         CHECKOUT_RETRY_DELAY,
         || {
+            prune_repo_worktrees(cache);
             if target.exists() {
                 fs::remove_dir_all(target).with_context(|| {
                     format!("remove incomplete worktree {}", target.display())
                 })?;
-                let _ = run_command_with_timeout(
-                    "git",
-                    &["--git-dir", &cache_arg, "worktree", "prune"],
-                    None,
-                    checkout_command_timeout(),
-                );
+                prune_repo_worktrees(cache);
             }
             run_command_with_timeout(
                 "git",
@@ -2393,6 +2389,64 @@ fn create_worktree_from_cache(
             Ok(())
         },
     )
+}
+
+fn prune_repo_worktrees(cache: &Path) {
+    if !cache.join("HEAD").exists() {
+        return;
+    }
+    let Ok(cache_arg) = path_str(cache) else {
+        return;
+    };
+    let _ = run_command_with_timeout(
+        "git",
+        &["--git-dir", cache_arg, "worktree", "prune"],
+        None,
+        checkout_command_timeout(),
+    );
+}
+
+fn cache_for_pr_worktree(worktree: &Path) -> Option<PathBuf> {
+    let cache = worktree.parent()?.join("repo.git");
+    cache.join("HEAD").exists().then_some(cache)
+}
+
+fn remove_pr_worktree(worktree: &Path) -> Result<()> {
+    if let Some(cache) = cache_for_pr_worktree(worktree) {
+        if worktree.exists() {
+            let cache_arg = path_str(&cache)?.to_owned();
+            let worktree_arg = path_str(worktree)?.to_owned();
+            if let Err(error) = run_command_with_timeout(
+                "git",
+                &[
+                    "--git-dir",
+                    &cache_arg,
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree_arg,
+                ],
+                None,
+                checkout_command_timeout(),
+            ) {
+                eprintln!(
+                    "git worktree remove failed for {}; falling back to directory removal: \
+                     {error:#}",
+                    worktree.display()
+                );
+                fs::remove_dir_all(worktree)
+                    .with_context(|| format!("remove worktree {}", worktree.display()))?;
+            }
+        }
+        prune_repo_worktrees(&cache);
+        return Ok(());
+    }
+
+    if worktree.exists() {
+        fs::remove_dir_all(worktree)
+            .with_context(|| format!("remove worktree {}", worktree.display()))?;
+    }
+    Ok(())
 }
 
 fn configured_open_prs(config: &Config) -> Result<Vec<(String, PullRequest)>> {
