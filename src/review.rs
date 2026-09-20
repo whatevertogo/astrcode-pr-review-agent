@@ -37,6 +37,9 @@ async fn review_trigger(
     run_info: &RunInfo,
     trigger: &ReviewTrigger,
 ) -> Result<ReviewRecord> {
+    if config.review_pipeline == "quality_first" && trigger_requests_review(trigger) {
+        return review_run::poll_review(config, state, run_info, trigger).await;
+    }
     let mut trigger = trigger.clone();
     if let Ok(details) = pr_details(&trigger.repo, trigger.pr.number) {
         trigger.pr = details;
@@ -74,6 +77,7 @@ async fn review_trigger(
             &memory_paths,
             reused_session,
             context,
+            None,
         )
         .await;
         if result.is_err() && reused_session {
@@ -99,6 +103,7 @@ async fn review_trigger(
                 &memory_paths,
                 reused_session,
                 context,
+                None,
             )
             .await;
         }
@@ -376,6 +381,7 @@ async fn run_coverage_first_review(
     memory_paths: &PromptMemoryPaths,
     reused_session: bool,
     context: &ReviewContext,
+    frozen_checks: Option<&[VerificationItem]>,
 ) -> Result<ValidatedReview> {
     let debug_dir = create_debug_run_dir(config, trigger).ok();
     if config.review_pipeline != "coverage_first" {
@@ -405,7 +411,9 @@ async fn run_coverage_first_review(
     let shards = plan_review_shards(config, context);
     let mut coverage = initial_coverage(context);
     let mut outputs = Vec::new();
-    let deterministic_checks = if config.deterministic_checks_enabled {
+    let deterministic_checks = if let Some(checks)=frozen_checks {
+        checks.to_vec()
+    } else if config.deterministic_checks_enabled {
         deterministic_review_verification(config, trigger, worktree)
     } else {
         Vec::new()
@@ -1580,7 +1588,9 @@ fn verification_error(label: &str, error: anyhow::Error) -> VerificationItem {
             }
             .into(),
         ),
-        notes: Some(one_line(&text)),
+        // Compiler progress can precede the actual error by hundreds of lines.
+        // Preserve the diagnostic tail instead of publishing only progress text.
+        notes: Some(one_line(&text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))),
     }
 }
 
@@ -1848,364 +1858,6 @@ fn changed_file_summary(pr: &PullRequest) -> String {
         .map(|file| file.path.as_str())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn collect_review_context(
-    config: &Config,
-    trigger: &ReviewTrigger,
-    worktree: &Path,
-) -> Result<ReviewContext> {
-    let pr_number = trigger.pr.number.to_string();
-    let pr_view = run_command(
-        "gh",
-        &[
-            "pr",
-            "view",
-            &pr_number,
-            "--repo",
-            &trigger.repo,
-            "--json",
-            "title,body,baseRefName,headRefOid,files,commits,comments,reviews,reviewDecision,\
-             mergeStateStatus",
-        ],
-        None,
-    )
-    .with_context(|| {
-        format!(
-            "collect gh pr view for {}#{}",
-            trigger.repo, trigger.pr.number
-        )
-    })?;
-    let name_only = run_command(
-        "gh",
-        &[
-            "pr",
-            "diff",
-            &pr_number,
-            "--repo",
-            &trigger.repo,
-            "--name-only",
-        ],
-        None,
-    )
-    .with_context(|| {
-        format!(
-            "collect gh pr diff --name-only for {}#{}",
-            trigger.repo, trigger.pr.number
-        )
-    })?;
-    let checks = run_command(
-        "gh",
-        &["pr", "checks", &pr_number, "--repo", &trigger.repo],
-        None,
-    )
-    .unwrap_or_else(|error| format!("gh pr checks unavailable: {error:#}"));
-    let diff_stat = run_command(
-        "git",
-        &[
-            "diff",
-            "--stat",
-            &format!("origin/{}...HEAD", trigger.pr.base_ref_name),
-        ],
-        Some(worktree),
-    )
-    .unwrap_or_else(|error| format!("git diff --stat unavailable: {error:#}"));
-    let files = pull_request_files(&trigger.repo, trigger.pr.number)?;
-    let (file_contexts, commentable_lines, non_commentable_files) =
-        build_review_file_contexts(config, &files);
-    let annotated = file_contexts
-        .iter()
-        .map(|file| file.annotated_patch.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let changed_files_text = if name_only.trim().is_empty() {
-        "No files returned.".to_string()
-    } else {
-        name_only.clone()
-    };
-    let annotated_text = if annotated.trim().is_empty() {
-        "No annotated patch lines were available.".to_string()
-    } else {
-        annotated.clone()
-    };
-    let non_commentable_text = if non_commentable_files.is_empty() {
-        "None".to_string()
-    } else {
-        non_commentable_files.join("\n")
-    };
-
-    let mut text = format!(
-        r#"GitHub command audit:
-- `gh pr view {pr_number} --repo {repo} --json ...`: collected
-- `gh pr diff {pr_number} --repo {repo} --name-only`: collected
-- `gh api --paginate --slurp repos/{repo}/pulls/{pr_number}/files?per_page=100`: collected {file_count} file(s)
-- `gh pr checks {pr_number} --repo {repo}`: collected or recorded as unavailable
-- `git diff --stat origin/{base}...HEAD`: collected or recorded as unavailable
-
-PR metadata JSON:
-{pr_view}
-
-Changed files from `gh pr diff --name-only`:
-{changed_files_text}
-
-Checks:
-{checks}
-
-Diff stat:
-{diff_stat}
-
-Annotated diff.
-Use only `RIGHT <line>` or `LEFT <line>` locations that appear here for findings:
-{annotated_text}
-
-Non-inline-commentable files:
-{non_commentable_text}
-"#,
-        pr_number = trigger.pr.number,
-        repo = trigger.repo,
-        file_count = files.len(),
-        base = trigger.pr.base_ref_name,
-        pr_view = pr_view,
-        changed_files_text = changed_files_text,
-        checks = checks,
-        diff_stat = diff_stat,
-        annotated_text = annotated_text,
-        non_commentable_text = non_commentable_text,
-    );
-    let truncated = truncate_text(&mut text, config.review_context_max_bytes);
-    Ok(ReviewContext {
-        text,
-        commentable_lines,
-        non_commentable_files,
-        truncated,
-        files: file_contexts,
-    })
-}
-
-fn pull_request_files(repo: &str, pr_number: u64) -> Result<Vec<PullRequestApiFile>> {
-    let endpoint = format!("repos/{repo}/pulls/{pr_number}/files?per_page=100");
-    let output = run_command("gh", &["api", "--paginate", "--slurp", &endpoint], None)?;
-    let pages: Vec<Vec<PullRequestApiFile>> = serde_json::from_str(&output)
-        .with_context(|| format!("parse gh paginated pull files for {repo}#{pr_number}"))?;
-    Ok(pages.into_iter().flatten().collect())
-}
-
-fn build_review_file_contexts(
-    config: &Config,
-    files: &[PullRequestApiFile],
-) -> (
-    Vec<ReviewFileContext>,
-    BTreeSet<CommentLineKey>,
-    Vec<String>,
-) {
-    let mut contexts = Vec::new();
-    let mut commentable_lines = BTreeSet::new();
-    let mut non_commentable_files = Vec::new();
-    for file in files {
-        contexts.push(review_file_context(
-            config,
-            file,
-            &mut commentable_lines,
-            &mut non_commentable_files,
-        ));
-    }
-    (contexts, commentable_lines, non_commentable_files)
-}
-
-fn review_file_context(
-    config: &Config,
-    file: &PullRequestApiFile,
-    commentable_lines: &mut BTreeSet<CommentLineKey>,
-    non_commentable_files: &mut Vec<String>,
-) -> ReviewFileContext {
-    let mut annotated = String::new();
-    let status = file.status.as_deref().unwrap_or("modified");
-    annotated.push_str(&format!(
-        "\n--- file: {} status={} +{} -{} changes={}\n",
-        file.filename, status, file.additions, file.deletions, file.changes
-    ));
-    if let Some(previous) = file.previous_filename.as_deref() {
-        annotated.push_str(&format!("previous_filename: {previous}\n"));
-    }
-    let mut kind = classify_review_file(file);
-    match file.patch.as_deref() {
-        Some(patch) if !patch.trim().is_empty() => {
-            annotate_patch(file, patch, &mut annotated, commentable_lines);
-        },
-        _ => {
-            kind = ReviewFileKind::NoPatch;
-            annotated
-                .push_str("no patch available; findings in this file cannot be inline-commented\n");
-            non_commentable_files.push(format!("{} ({status}; no patch)", file.filename));
-        },
-    }
-    let bytes = annotated.len();
-    if matches!(kind, ReviewFileKind::Code | ReviewFileKind::Docs)
-        && bytes > config.review_shard_max_bytes
-    {
-        kind = ReviewFileKind::Oversized;
-    }
-    ReviewFileContext {
-        path: file.filename.clone(),
-        status: status.into(),
-        additions: file.additions,
-        deletions: file.deletions,
-        changes: file.changes,
-        previous_filename: file.previous_filename.clone(),
-        annotated_patch: annotated,
-        kind,
-        bytes,
-    }
-}
-
-#[cfg(test)]
-fn annotate_pull_files(
-    files: &[PullRequestApiFile],
-    annotated: &mut String,
-    commentable_lines: &mut BTreeSet<CommentLineKey>,
-    non_commentable_files: &mut Vec<String>,
-) {
-    for file in files {
-        let status = file.status.as_deref().unwrap_or("modified");
-        annotated.push_str(&format!(
-            "\n--- file: {} status={} +{} -{} changes={}\n",
-            file.filename, status, file.additions, file.deletions, file.changes
-        ));
-        if let Some(previous) = file.previous_filename.as_deref() {
-            annotated.push_str(&format!("previous_filename: {previous}\n"));
-        }
-        match file.patch.as_deref() {
-            Some(patch) if !patch.trim().is_empty() => {
-                annotate_patch(file, patch, annotated, commentable_lines);
-            },
-            _ => {
-                annotated.push_str(
-                    "no patch available; findings in this file cannot be inline-commented\n",
-                );
-                non_commentable_files.push(format!("{} ({status}; no patch)", file.filename));
-            },
-        }
-    }
-}
-
-fn classify_review_file(file: &PullRequestApiFile) -> ReviewFileKind {
-    let path = file.filename.to_ascii_lowercase();
-    if is_generated_path(&path) {
-        ReviewFileKind::Generated
-    } else if is_docs_path(&path) {
-        ReviewFileKind::Docs
-    } else {
-        ReviewFileKind::Code
-    }
-}
-
-fn is_docs_path(path: &str) -> bool {
-    path.starts_with("docs/")
-        || path.ends_with(".md")
-        || path.ends_with(".mdx")
-        || path.ends_with(".txt")
-        || path.ends_with(".rst")
-}
-
-fn is_generated_path(path: &str) -> bool {
-    path.contains("/generated/")
-        || path.ends_with(".lock")
-        || path.ends_with("package-lock.json")
-        || path.ends_with("pnpm-lock.yaml")
-        || path.ends_with("yarn.lock")
-        || path.ends_with("cargo.lock")
-        || path.ends_with(".min.js")
-        || path.ends_with(".snap")
-}
-
-fn annotate_patch(
-    file: &PullRequestApiFile,
-    patch: &str,
-    annotated: &mut String,
-    commentable_lines: &mut BTreeSet<CommentLineKey>,
-) {
-    let mut old_line = 0u64;
-    let mut new_line = 0u64;
-    for line in patch.lines() {
-        if let Some((old_start, new_start)) = parse_hunk_header(line) {
-            old_line = old_start;
-            new_line = new_start;
-            annotated.push_str(line);
-            annotated.push('\n');
-            continue;
-        }
-        if line.starts_with("\\ No newline at end of file") {
-            annotated.push_str(line);
-            annotated.push('\n');
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('+') {
-            annotated.push_str(&format!("RIGHT {new_line} +{}\n", one_line(rest)));
-            commentable_lines.insert(CommentLineKey {
-                path: file.filename.clone(),
-                side: CommentSide::Right,
-                line: new_line,
-            });
-            new_line = new_line.saturating_add(1);
-        } else if let Some(rest) = line.strip_prefix('-') {
-            annotated.push_str(&format!("LEFT {old_line} -{}\n", one_line(rest)));
-            commentable_lines.insert(CommentLineKey {
-                path: file.filename.clone(),
-                side: CommentSide::Left,
-                line: old_line,
-            });
-            old_line = old_line.saturating_add(1);
-        } else if let Some(rest) = line.strip_prefix(' ') {
-            annotated.push_str(&format!("RIGHT {new_line}  {}\n", one_line(rest)));
-            commentable_lines.insert(CommentLineKey {
-                path: file.filename.clone(),
-                side: CommentSide::Right,
-                line: new_line,
-            });
-            old_line = old_line.saturating_add(1);
-            new_line = new_line.saturating_add(1);
-        }
-    }
-}
-
-fn parse_hunk_header(line: &str) -> Option<(u64, u64)> {
-    if !line.starts_with("@@") {
-        return None;
-    }
-    let mut parts = line.split_whitespace();
-    parts.next()?;
-    let old_range = parts.next()?;
-    let new_range = parts.next()?;
-    Some((
-        parse_range_start(old_range.trim_start_matches('-'))?,
-        parse_range_start(new_range.trim_start_matches('+'))?,
-    ))
-}
-
-fn parse_range_start(range: &str) -> Option<u64> {
-    range.split(',').next()?.parse().ok()
-}
-
-fn one_line(value: &str) -> String {
-    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out = collapsed.chars().take(500).collect::<String>();
-    if collapsed.chars().count() > 500 {
-        out.push_str("...");
-    }
-    out
-}
-
-fn truncate_text(text: &mut String, max_bytes: usize) -> bool {
-    if max_bytes == 0 || text.len() <= max_bytes {
-        return false;
-    }
-    let mut boundary = max_bytes;
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    text.truncate(boundary);
-    text.push_str("\n\n[truncated by astrcode-pr-review-agent]\n");
-    true
 }
 
 const CHECKOUT_COMMAND_ATTEMPTS: usize = 3;
@@ -2635,6 +2287,9 @@ fn post_auto_review_start_comment(
     config: &Config,
     trigger: &ReviewTrigger,
 ) -> Result<Option<String>> {
+    if config.review_pipeline == "quality_first" {
+        return review_run::status_comment(config, trigger, false);
+    }
     let body = auto_review_start_comment_body(config, trigger);
     post_issue_comment(&trigger.repo, trigger.pr.number, &body)
 }
@@ -2659,6 +2314,9 @@ fn post_auto_review_failure_comment(
     trigger: &ReviewTrigger,
     error: &str,
 ) -> Result<Option<String>> {
+    if config.review_pipeline == "quality_first" {
+        return review_run::status_comment(config, trigger, true);
+    }
     let body = auto_review_failure_comment_body(config, trigger, error);
     post_issue_comment(&trigger.repo, trigger.pr.number, &body)
 }
@@ -3803,287 +3461,6 @@ fn fallback_final_report(
         coverage = coverage,
         generation_note = generation_note,
     )
-}
-
-fn validate_review_output(
-    config: &Config,
-    output: &ReviewBotOutput,
-    context: &ReviewContext,
-) -> ValidatedReview {
-    let mut valid = Vec::new();
-    let mut summary_findings = Vec::new();
-    let mut unplaced = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    let candidates = output
-        .confirmed_findings
-        .iter()
-        .map(|finding| (FindingKind::Confirmed, finding))
-        .chain(
-            output
-                .advisory_findings
-                .iter()
-                .map(|finding| (FindingKind::Advisory, finding)),
-        );
-
-    for (index, (kind, finding)) in candidates.enumerate() {
-        match validate_finding(finding, kind, index, context) {
-            Ok(finding) => {
-                let key = format!(
-                    "{}:{}:{}:{}:{}",
-                    finding.kind.as_str(),
-                    finding.path.to_ascii_lowercase(),
-                    finding.side.as_github(),
-                    finding.line,
-                    finding.title.to_ascii_lowercase()
-                );
-                if seen.insert(key) {
-                    if confidence_allows_inline(config, &finding.confidence) {
-                        valid.push(finding);
-                    } else {
-                        summary_findings.push(finding);
-                    }
-                } else {
-                    unplaced.push(unplaced_from_validated(finding, "duplicate finding".into()));
-                }
-            },
-            Err(unplaced_finding) => unplaced.push(*unplaced_finding),
-        }
-    }
-
-    valid.sort_by_key(|finding| {
-        (
-            priority_rank(&finding.priority),
-            finding.original_index,
-            finding.path.clone(),
-            finding.line,
-        )
-    });
-    let max_inline = config.max_inline_comments;
-    let overflow = if max_inline == 0 || valid.len() <= max_inline {
-        Vec::new()
-    } else {
-        valid.split_off(max_inline)
-    };
-    for finding in overflow {
-        unplaced.push(unplaced_from_validated(
-            finding,
-            format!("exceeds max_inline_comments={max_inline}"),
-        ));
-    }
-
-    let mut residual_risk = output.residual_risk.clone();
-    if context.truncated {
-        residual_risk.push("审查上下文被插件字节上限截断。".into());
-    }
-    if !context.non_commentable_files.is_empty() {
-        residual_risk.push(format!(
-            "部分文件没有 GitHub patch，无法发布行内评论：{}",
-            context.non_commentable_files.join(", ")
-        ));
-    }
-
-    ValidatedReview {
-        inline_findings: valid,
-        summary_findings,
-        unplaced_findings: unplaced,
-        observations: output.observations.clone(),
-        investigation_log: output.investigation_log.clone(),
-        verification: output.verification.clone(),
-        residual_risk,
-        summary: output.summary.clone(),
-        coverage: None,
-        debug_dir: None,
-    }
-}
-
-fn validate_finding(
-    finding: &ReviewFinding,
-    kind: FindingKind,
-    index: usize,
-    context: &ReviewContext,
-) -> FindingValidationResult<ValidatedFinding> {
-    let priority = required_field(&finding.severity, "severity", finding)?;
-    let priority = normalize_priority(&priority).ok_or_else(|| {
-        Box::new(unplaced_from_raw(
-            finding,
-            format!("invalid severity `{priority}`; expected P0, P1, P2, or P3"),
-        ))
-    })?;
-    let confidence = required_field(&finding.confidence, "confidence", finding)?;
-    let confidence = normalize_confidence(&confidence).ok_or_else(|| {
-        Box::new(unplaced_from_raw(
-            finding,
-            format!("invalid confidence `{confidence}`; expected high, medium, or low"),
-        ))
-    })?;
-    let category = required_field(&finding.category, "category", finding)?;
-    let path = required_field(&finding.path, "path", finding)?;
-    let side_raw = required_field(&finding.side, "side", finding)?;
-    let side = CommentSide::parse(&side_raw).ok_or_else(|| {
-        Box::new(unplaced_from_raw(
-            finding,
-            format!("invalid side `{side_raw}`; expected RIGHT or LEFT"),
-        ))
-    })?;
-    let line = finding
-        .line
-        .filter(|line| *line > 0)
-        .ok_or_else(|| Box::new(unplaced_from_raw(finding, "missing or invalid line".into())))?;
-    let title = required_field(&finding.title, "title", finding)?;
-    let issue = required_field(&finding.issue, "issue", finding)?;
-    let evidence = required_field(&finding.evidence, "evidence", finding)?;
-    let project_context = required_field(&finding.project_context, "project_context", finding)?;
-    let impact = required_field(&finding.impact, "impact", finding)?;
-    let fix = required_field(&finding.fix, "fix", finding)?;
-    let key = CommentLineKey {
-        path: path.clone(),
-        side,
-        line,
-    };
-    let (side, line) = if context.commentable_lines.contains(&key) {
-        (side, line)
-    } else if let Some(fallback) = nearest_commentable_line(context, &path, line) {
-        (fallback.side, fallback.line)
-    } else {
-        return Err(Box::new(unplaced_from_raw(
-            finding,
-            format!(
-                "{} {} is not a commentable PR diff line",
-                side.as_github(),
-                line
-            ),
-        )));
-    };
-    Ok(ValidatedFinding {
-        priority,
-        kind,
-        confidence,
-        category,
-        path,
-        side,
-        line,
-        title,
-        issue,
-        evidence,
-        project_context,
-        impact,
-        fix,
-        original_index: index,
-    })
-}
-
-fn nearest_commentable_line(
-    context: &ReviewContext,
-    path: &str,
-    target_line: u64,
-) -> Option<CommentLineKey> {
-    context
-        .commentable_lines
-        .iter()
-        .filter(|line| line.path == path && line.side == CommentSide::Right)
-        .min_by_key(|line| line.line.abs_diff(target_line))
-        .filter(|line| line.line.abs_diff(target_line) <= 20)
-        .cloned()
-}
-
-fn required_field(
-    value: &Option<String>,
-    name: &str,
-    finding: &ReviewFinding,
-) -> FindingValidationResult<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| Box::new(unplaced_from_raw(finding, format!("missing {name}"))))
-}
-
-fn normalize_priority(value: &str) -> Option<String> {
-    match value.trim().to_ascii_uppercase().as_str() {
-        "P0" | "[P0]" => Some("P0".into()),
-        "P1" | "[P1]" => Some("P1".into()),
-        "P2" | "[P2]" => Some("P2".into()),
-        "P3" | "[P3]" => Some("P3".into()),
-        _ => None,
-    }
-}
-
-fn normalize_confidence(value: &str) -> Option<String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "high" | "高" => Some("high".into()),
-        "medium" | "med" | "中" => Some("medium".into()),
-        "low" | "低" => Some("low".into()),
-        _ => None,
-    }
-}
-
-fn priority_rank(priority: &str) -> u8 {
-    match priority {
-        "P0" => 0,
-        "P1" => 1,
-        "P2" => 2,
-        "P3" => 3,
-        _ => 4,
-    }
-}
-
-fn confidence_rank(confidence: &str) -> u8 {
-    match confidence {
-        "high" => 0,
-        "medium" => 1,
-        "low" => 2,
-        _ => 3,
-    }
-}
-
-fn confidence_allows_inline(config: &Config, confidence: &str) -> bool {
-    let min =
-        normalize_confidence(&config.inline_confidence_min).unwrap_or_else(|| "medium".into());
-    confidence_rank(confidence) <= confidence_rank(&min)
-}
-
-fn unplaced_from_raw(finding: &ReviewFinding, reason: String) -> UnplacedFinding {
-    UnplacedFinding {
-        priority: finding
-            .severity
-            .as_deref()
-            .and_then(normalize_priority)
-            .unwrap_or_else(|| "P3".into()),
-        kind: "Unknown".into(),
-        confidence: finding
-            .confidence
-            .as_deref()
-            .and_then(normalize_confidence)
-            .unwrap_or_else(|| "low".into()),
-        title: finding
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .unwrap_or("Untitled finding")
-            .to_owned(),
-        path: finding.path.clone(),
-        side: finding.side.clone(),
-        line: finding.line,
-        reason,
-    }
-}
-
-fn unplaced_from_validated(finding: ValidatedFinding, reason: String) -> UnplacedFinding {
-    let kind = finding.kind.as_str().to_owned();
-    let side = finding.side.as_github().to_owned();
-    UnplacedFinding {
-        priority: finding.priority,
-        kind,
-        confidence: finding.confidence,
-        title: finding.title,
-        path: Some(finding.path),
-        side: Some(side),
-        line: Some(finding.line),
-        reason,
-    }
 }
 
 fn publish_structured_review(

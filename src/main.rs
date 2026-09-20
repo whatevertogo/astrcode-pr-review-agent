@@ -25,6 +25,9 @@ async fn run() -> Result<()> {
         Some("s5r") | None => run_s5r().await.map_err(|error| {
             anyhow::anyhow!("s5r worker failed: {} ({})", error.message, error.code)
         }),
+        Some("review") => {
+            astrcode_pr_review_agent::review_cli(std::env::args().skip(2).collect()).await
+        }
         Some("poll") => {
             let config = Config::load_or_create()?;
             poll_once(&config).await
@@ -35,7 +38,7 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Some("help") | Some("--help") | Some("-h") => {
-            println!("usage: astrcode-pr-review-agent [s5r|poll|status]");
+            println!("usage: astrcode-pr-review-agent [s5r|poll|status|review --repo OWNER/REPO --pr NUMBER --output-dir PATH [--publish]]");
             Ok(())
         }
         Some(other) => anyhow::bail!("unknown mode: {other}"),

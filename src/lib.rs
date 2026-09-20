@@ -22,7 +22,12 @@ include!("webhook.rs");
 include!("poller.rs");
 include!("staging.rs");
 include!("review.rs");
+include!("review_context.rs");
+include!("review_validation.rs");
 include!("status.rs");
+
+mod review_run;
+pub use review_run::review_cli;
 
 #[cfg(test)]
 mod tests {
@@ -212,6 +217,16 @@ mod tests {
             "VitaDynamics/Vvbot",
             &comment(5, "我是 whatevertogo 的自动化审查 agent。\n@whatevertogo")
         ));
+        for marker in [
+            "<!-- astrcode-review-summary:v2 -->",
+            "<!-- astrcode-finding:v2:id -->",
+        ] {
+            assert!(!is_trigger_comment(
+                &config,
+                "VitaDynamics/Vvbot",
+                &comment(6, &format!("{marker}\n@whatevertogo review"))
+            ));
+        }
     }
 
     #[test]

@@ -399,6 +399,8 @@ fn is_trigger_comment(config: &Config, repo: &str, comment: &IssueComment) -> bo
         return false;
     };
     if body.contains(&config.comment_marker)
+        || body.contains("<!-- astrcode-review-summary:v2 -->")
+        || body.contains("<!-- astrcode-finding:v2:")
         || body.contains(AGENT_LINE)
         || body.contains("我是 whatevertogo 的自动化审查 agent。")
     {

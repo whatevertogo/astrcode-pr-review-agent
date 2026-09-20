@@ -205,7 +205,7 @@ fn default_json_repair_attempts() -> usize {
 }
 
 fn default_review_pipeline() -> String {
-    "coverage_first".into()
+    "quality_first".into()
 }
 
 fn default_review_shard_max_bytes() -> usize {
@@ -217,7 +217,7 @@ fn default_max_files_per_shard() -> usize {
 }
 
 fn default_max_review_passes_per_pr() -> usize {
-    8
+    16
 }
 
 fn default_inline_priority_max() -> String {
@@ -443,7 +443,7 @@ struct ObservationMemory {
     recorded_at: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PullRequest {
     number: u64,
@@ -459,12 +459,12 @@ struct PullRequest {
     author: Option<GhUser>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct PullRequestFile {
     path: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct PullRequestApiFile {
     filename: String,
     #[serde(default)]
@@ -481,7 +481,7 @@ struct PullRequestApiFile {
     previous_filename: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewContext {
     text: String,
     commentable_lines: BTreeSet<CommentLineKey>,
@@ -490,7 +490,7 @@ struct ReviewContext {
     files: Vec<ReviewFileContext>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewFileContext {
     path: String,
     status: String,
@@ -503,7 +503,7 @@ struct ReviewFileContext {
     bytes: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum ReviewFileKind {
     Code,
     Docs,
@@ -533,14 +533,14 @@ impl ReviewFileKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewShard {
     index: usize,
     files: Vec<ReviewFileContext>,
     bytes: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum CoverageStatus {
     Reviewed,
     NoPatch,
@@ -561,14 +561,14 @@ impl CoverageStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CoverageEntry {
     path: String,
     status: CoverageStatus,
     reason: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ReviewCoverage {
     entries: BTreeMap<String, CoverageEntry>,
 }
@@ -630,14 +630,14 @@ impl ReviewCoverage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct CommentLineKey {
     path: String,
     side: CommentSide,
     line: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum CommentSide {
     Right,
     Left,
@@ -670,7 +670,7 @@ struct ReviewBotOutput {
     observations: Vec<ReviewObservation>,
     #[serde(default)]
     files_reviewed: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_contract_notes")]
     investigation_log: Vec<String>,
     #[serde(default, skip_deserializing)]
     verification: Vec<VerificationItem>,
@@ -730,7 +730,7 @@ struct ReviewObservation {
     next_step: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum FindingKind {
     Confirmed,
     Advisory,
@@ -761,7 +761,7 @@ struct VerificationItem {
     notes: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ValidatedFinding {
     priority: String,
     kind: FindingKind,
@@ -779,7 +779,7 @@ struct ValidatedFinding {
     original_index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UnplacedFinding {
     priority: String,
     kind: String,
@@ -791,7 +791,7 @@ struct UnplacedFinding {
     reason: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ValidatedReview {
     inline_findings: Vec<ValidatedFinding>,
     summary_findings: Vec<ValidatedFinding>,
@@ -824,7 +824,7 @@ struct PostedPullReview {
     id: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct GhUser {
     login: String,
 }

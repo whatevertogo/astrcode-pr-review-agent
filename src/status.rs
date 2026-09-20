@@ -191,7 +191,17 @@ fn expand_home(input: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(input))
 }
 
+tokio::task_local! {
+    static RUN_DATA_DIR: PathBuf;
+}
+
 fn agent_dir() -> Result<PathBuf> {
+    if let Ok(path) = RUN_DATA_DIR.try_with(Clone::clone) {
+        return Ok(path);
+    }
+    if let Some(path) = std::env::var_os("ASTRCODE_PR_REVIEW_AGENT_DATA_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     Ok(astrcode_dir()?.join("pr-review-agent"))
 }
 

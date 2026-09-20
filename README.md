@@ -1,8 +1,9 @@
 # Astrcode PR Review Agent
 
 Astrcode PR Review Agent is an external s5r extension for Astrcodey. It watches
-GitHub pull requests, creates one persistent Astrcode review session per PR, and
-publishes automated review results back to GitHub.
+GitHub pull requests, runs staged Astrcode reviews, and publishes structured
+review results back to GitHub. A standalone CLI can analyze a fixed PR without
+the polling queue or GitHub writes.
 
 The plugin is designed for the Astrcodey extension architecture: Astrcodey starts
 the s5r worker from `extension.json`, while the worker performs lightweight
@@ -16,9 +17,9 @@ analysis.
   `@whatevertogo review it`.
 - Automatically reviews newly discovered open PRs once, without replaying all
   existing PRs on first startup.
-- Reuses one persistent Astrcode session per PR.
-- Runs a coverage-first review pipeline inspired by PR-Agent style workflows:
-  orientation, file shards, global risk pass, aggregation, and final summary.
+- Uses isolated sessions for review stages, sharing at most 8 KB of source-anchored contracts and prior candidates instead of investigation histories; ordinary PR conversations retain their persistent session.
+- Defaults new configurations to a quality-first pipeline: file shards, candidate/global verification, and a deterministic report.
+- Preserves `coverage_first` for existing configurations and paired baseline evaluation.
 - Embeds review instructions from `prompts/` at compile time; no separate remote
   `reviewnow` skill directory is required.
 - Validates findings against GitHub diff lines and posts inline review comments
@@ -81,7 +82,8 @@ Important defaults:
   "webhook_enabled": false,
   "auto_review_new_prs": true,
   "auto_review_bootstrap_existing_open_prs": false,
-  "review_pipeline": "coverage_first",
+  "review_pipeline": "quality_first",
+  "max_review_passes_per_pr": 16,
   "max_inline_comments": 12,
   "inline_priority_max": "P2",
   "nitpick_inline_priority_max": "P3",
@@ -90,18 +92,75 @@ Important defaults:
 }
 ```
 
-The current production deployment can be made more verbose by setting P3 and
-advisory limits higher:
+The quality-first pipeline publishes only confirmed, high-confidence P0–P2
+findings. Advisory, lower-confidence, and overflow findings remain in the folded
+summary with their evidence. `max_inline_comments` limits inline comments (zero
+means no inline comments in this pipeline). Existing explicit pipeline choices
+are not migrated automatically.
 
-```json
-{
-  "inline_priority_max": "P3",
-  "max_inline_comments": 100,
-  "max_advisory_inline_comments": 100,
-  "max_p3_inline_comments": 100,
-  "max_nitpick_inline_comments": 100
-}
+## Isolated single-run review
+
+Run on the same machine as AstrCodey, using its existing model configuration:
+
+```bash
+astrcode-pr-review-agent review --repo OWNER/REPO --pr 123 --output-dir /absolute/path/run
 ```
+
+This reads the installed configuration, but keeps checkout caches, stage results,
+and review-agent state under the output directory. It does not start a poller,
+restart AstrCodey, or publish to GitHub. A run directory is locked against concurrent
+use. Model settings, base/head revisions, applicable instructions and prompts are
+part of the cache identity; changed inputs invalidate stage reuse.
+
+- `--prepare-only` freezes a `snapshot.json` including immutable base/head, code
+  patches, path instructions and deterministic check receipts.
+- `--snapshot PATH` reviews that frozen input, including closed historical PRs. Publication still requires the current base/head to match exactly; merged or closed PRs receive an explicit lifecycle note.
+- `--head FULL_SHA` prepares a historical PR commit, deriving its merge base and
+  immutable file manifest. The SHA must belong to that PR. Current descriptions
+  are omitted because they may reveal later fixes. Historical results still
+  cannot publish unless they match the current PR base/head.
+- `--pipeline baseline` evaluates the original coverage-first analysis and final
+  model report without publishing. Existing review answers are excluded from the
+  collected snapshot; audit tool logs for accidental answer access during evaluation.
+- `--publish` explicitly publishes the result to the requested PR. Both base
+  and head must still match. Reusing the same run directory replays successful
+  stages and reconciles GitHub markers before posting missing comments.
+
+Artifacts are `result.json` (`ReviewRunResult`, schema version 3), `report.md`,
+`stages.json`, prompts/responses, and archived session logs. Each stage receipt
+includes its session, input identity, completion/failure and actual usage.
+Failed/retried attempts remain accounted for. Provider usage, estimates, missing
+usage, and unknown cache accounting are distinguished; reasoning output and cache
+subsets are never added to totals twice. Dollar cost is not inferred from token
+counts alone.
+
+Older result records are revalidated from compatible cached stage outputs; their
+rendered/placement decisions are not treated as current validation. Saved parse
+failures can be recovered after a decoder update without another model request,
+preserving their original usage and error. Original priorities and full evidence
+survive summary-only placement. Global verification reconciles all shard
+observations, including contradictory or superseded claims, before publication.
+
+Large patches are split at hunk boundaries. Single hunks larger than the configured
+budget, absent textual diffs, exhausted pass budgets and failed checks are reported
+as incomplete. A global verification pass is reserved for multi-shard reviews or
+candidate findings. Missing inline anchors never get moved to nearby lines.
+
+Publication uses one owned summary comment plus a batch COMMENT review. It never
+approves or requests changes. After ambiguous POST failures, GitHub is queried for
+owned finding markers before an explicit retry. Local artifacts preserve the full
+result even if a GitHub payload is too large or publication fails. Prompts direct
+model tools to read-only investigation; this is not an OS sandbox.
+
+For the fixed four-sample paired campaign:
+
+```bash
+python3 scripts/compare_reviews.py --binary /absolute/path/astrcode-pr-review-agent --root /absolute/path/evaluation
+```
+
+The campaign runs sequentially, alternates baseline/optimized order, and waits for
+resident review sessions to become idle. It never publishes. Review findings must
+be adjudicated against source before interpreting counts as precision or recall.
 
 ## Requirements
 
