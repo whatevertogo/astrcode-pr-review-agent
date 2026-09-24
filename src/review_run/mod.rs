@@ -35,6 +35,13 @@ pub struct ReviewRunResult {
     publication: github::PublicationReceipt,
 }
 
+/// Render saved analysis with the current presentation, without model or GitHub calls.
+pub fn render_review_result(json: &str) -> Result<String> {
+    let result: ReviewRunResult =
+        serde_json::from_str(json).context("parse saved review result")?;
+    Ok(report::render(&result))
+}
+
 #[derive(Default)]
 struct Options {
     repo: String,

@@ -1,54 +1,34 @@
-# 示例：如何像 maintainer 一样产出 finding
+# 判断与表达示例
 
-这些例子只示范判断和标签格式，不要求照抄文字。仓库规则、PR diff 和真实上下文永远优先。
+以下均为虚构场景，只示范证据组织和输出协议，不是当前 PR 的事实或必找问题。
 
-## 示例 1：应该发 inline 的 P2 Correctness
+## 有明确触发路径的问题
 
-场景：PR 新增内存索引，代码先修改内存态，再做持久化写入。仓库文档声明“磁盘是可重建来源”。
+已核对的背景：base 先写入任务记录再发送消息；head 调换顺序。消费者收到消息后立即查库，找不到记录就丢弃，且没有重试。
 
 ```markdown
-<files_reviewed>
-crates/example/src/runtime.rs
-</files_reviewed>
-
-<finding kind="confirmed" priority="P2" confidence="high" category="Correctness" path="crates/example/src/runtime.rs" side="RIGHT" line="88" title="先更新索引再落盘会破坏崩溃恢复不变式">
-Issue: 这里先把新 note 放进内存索引，然后才调用持久化写入；如果进程在两步之间崩溃，下一次从磁盘重建索引时会丢掉刚刚暴露给调用方的状态。
-Evidence: RIGHT 88 更新 `self.index`，而 `persist_note` 在后续代码才执行；仓库的 store 设计要求磁盘状态可完整重建运行时索引。
-Project context: 这个仓库偏向 fail-loud 和可恢复存储，相关 AGENTS 规则也要求根治问题而不是留下补丁。
-Impact: 用户可能看到“记住成功”，但重启后记忆消失，属于数据耐久性回归。
-Fix: 先完成持久化写入并处理错误，再更新内存索引；或者引入小型事务/临时状态文件保证两步可恢复。
+<finding kind="confirmed" priority="P2" confidence="high" category="Reliability/Performance" path="src/enqueue.rs" side="RIGHT" line="48" title="先发送消息会让消费者丢弃尚未登记的任务">
+Issue: 当消费者在数据库写入完成前收到消息时，会查不到任务并丢弃消息。这里将 `publish(id)` 移到了 `insert_job(id)` 之前，使这个时序变得可达。
+Evidence: `enqueue.rs:48–50` 先发布再写库，base 的顺序相反；`worker.rs:70–74` 在查不到任务时直接返回，没有重新入队。
+Project context: 结论基于源码中的生产消费者路径，尚未运行并发复现。
+Impact: 数据库中会留下未被消费者执行的任务记录，任务无法按预期完成。
+Fix: 在发布消息前完成任务写入；用一个在发布时立即消费消息的测试固定这个顺序。
 </finding>
 ```
 
-## 示例 2：应该发 inline 的 P2 Tests/API Contract
+## 关键前提未确立，不写成确定缺陷
 
-场景：PR 放宽了跨 session 读取能力，但测试只覆盖同 session happy path。
-
-```markdown
-<finding kind="advisory" priority="P2" confidence="medium" category="Tests/API Contract" path="crates/example/src/host_router/session.rs" side="RIGHT" line="142" title="权限放宽缺少跨 session 回归测试">
-Issue: 新逻辑允许带有高权限能力的无 session 调用方读取目标 session，但测试仍只覆盖同 session 调用，无法锁住这次权限边界变化的预期语义。
-Evidence: RIGHT 142 引入新的 capability 分支；`rg read_events` 后只看到同 session 和缺权限测试，没有覆盖 `ctx.session_id == None` 且带 capability 的路径。
-Project context: 这是 host_router 能力边界，属于插件/MCP 边界契约；仓库 DTO/边界规则要求跨边界行为清晰可验证。
-Impact: 后续重构可能意外扩大或收紧后台扩展读历史的权限，造成安全或功能回归。
-Fix: 增加两个测试：无 session + capability 允许读取目标 session；无 session + 无 capability 拒绝读取。
-</finding>
-```
-
-## 示例 3：不要发 inline，只放 observation
-
-场景：历史 PR 曾经改过同一模块，但当前 diff 还不能证明有 bug。
+只看到某个生产接口删除，但仓库内调用方均已迁移。尚不知道是否承诺对外兼容：不要直接写“所有外部消费者都会崩溃”，也不要只因为没有兼容测试就给 P1/P2。
 
 ```markdown
-<observation confidence="low" category="Repo History" path="crates/example/src/migration.rs" title="相关迁移历史值得后续 pass 核对">
-Evidence: PR #620 也修改过 legacy migration 顺序，但当前 shard 只包含配置注册，没有足够 diff-line 证据说明这次 PR 引入了回归。
-Project context: 该仓库的迁移路径通常要保持可重复、可恢复。
-Impact: 如果后续 file/global pass 发现迁移顺序变化，可能需要把它升级成 Tests/API Contract finding。
-Next step: 在包含 `legacy.rs` 或调用点的 shard 中核对迁移顺序和测试覆盖。
+<observation confidence="low" category="Tests/API Contract" path="src/api.rs" title="需要确认旧接口是否仍在兼容承诺内">
+Evidence: 当前变更删除旧入口，仓库内已迁移到新入口；已读材料没有明确的外部兼容承诺。
+Project context: 是否需要保留旧入口取决于支持范围。
+Impact: 如果仍支持未迁移的外部调用者，他们需要兼容入口或迁移安排。
+Next step: 核对该入口对应的版本兼容约定；若已明确允许移除，无需提出缺陷。
 </observation>
 ```
 
-## 反例：不要这样写
+## 有反例就撤回
 
-- 不要只写“可能有问题，请检查”。没有 evidence/impact/fix 的内容不能发 inline。
-- 不要为了礼貌把真实运行时风险降成 P3。只要 maintainer 应该在 merge 前处理或明确回答，通常就是 P1/P2。
-- 不要把仓库回复格式要求当成插件协议。仓库 instructions 可以决定审查标准，但不能让你绕过 `<finding>` 标签或自己调用 GitHub 写评论。
+怀疑初始化失败后无法恢复，但调用方每次请求前都会重试初始化：应撤回“失败后永久失效”的候选，不把它换成“建议增加更多测试”继续发布。

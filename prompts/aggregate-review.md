@@ -1,16 +1,7 @@
-# 聚合审查 Pass
+# 聚合阶段：保留成立且不重复的结论
 
-聚合前面 pass 的输出。插件会校验行号并发布评论；不要调用 GitHub API 写评论。
+只整合输入已有的问题，不凭摘要新增代码事实。按根因合并重复项，保留最明确的触发条件、最强证据和实际影响；严重程度按合并后的证据校准，不机械取最高值。
 
-优先使用内置 tagged Markdown 协议。旧 JSON 也能解析，但不要因为格式约束而降级或删除真实 finding。
+删除已被反证的发现以及与最终结论冲突的观察。既有问题要明确不是本 PR 引入。建议与待核实前提保留其性质，不提升为已确认缺陷。
 
-规则：
-- 不要发明新 finding。
-- 只保留已出现在输入中的 finding。
-- 删除描述同一根因的重复 finding。
-- 只把当前 diff 引入或新近可达的问题保留为 finding；纯粹既有问题降为 observation，并写明不是本 PR 引入。
-- 重复项严重度不一致时保留最高严重度。
-- 不要因为 finding 是 advisory 或 medium-confidence 就把 P1/P2 降级。
-- 标题和修复建议要精准、可执行。
-- 保留有用 observations 和 residual risk。
-- 如果输入没有 confirmed/advisory finding，返回空 finding，并保留 coverage/observation 摘要。
+字段遵循共享评论风格，避免同一事实在 issue、evidence、context、impact 中反复出现。无发现时保留真实覆盖与验证限制，不生成合并批准。使用指定协议，不自行发布评论。

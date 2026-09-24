@@ -27,10 +27,11 @@ include!("review_validation.rs");
 include!("status.rs");
 
 mod mention;
+mod review_comments;
 pub use mention::{discover_once, enqueue_cli, mention_status_cli};
 
 mod review_run;
-pub use review_run::review_cli;
+pub use review_run::{render_review_result, review_cli};
 
 #[cfg(test)]
 mod tests {
@@ -335,7 +336,7 @@ mod tests {
         assert!(prompt.contains("插件收集的 GitHub PR 上下文"));
         assert!(prompt.contains("GitHub command audit"));
         assert!(prompt.contains("<finding"));
-        assert!(prompt.contains("priority=\"P1\""));
+        assert!(prompt.contains("priority=\"P2\""));
         assert!(prompt.contains("do not run `gh api` to create comments"));
         assert!(prompt.contains("插件会校验标签并发布行内评论"));
         assert!(prompt.contains("The plugin posts all GitHub review comments"));
@@ -402,13 +403,13 @@ mod tests {
             &[],
         );
 
-        assert!(prompt.contains("PR 定向分析 Pass"));
+        assert!(prompt.contains("定向阶段"));
         assert!(prompt.contains("Repository PR/Issue relation reminders"));
         assert!(prompt.contains("PR #620 affects storage"));
         assert!(prompt.contains("插件收集的 PR 上下文"));
         assert!(prompt.contains("src/storage.rs"));
         assert!(!prompt.contains("GitHub command audit"));
-        assert!(prompt.contains("内置标签协议"));
+        assert!(prompt.contains("标签输出协议"));
     }
 
     #[test]
@@ -803,14 +804,10 @@ One concrete finding and one repo-history reminder.
             comments[0].get("side").and_then(Value::as_str),
             Some("RIGHT")
         );
-        assert!(
-            comment_body.starts_with("<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。")
-        );
-        assert!(
-            comment_body.contains("[P1][Confirmed][high 置信度] Persist storage before returning")
-        );
-        assert!(comment_body.contains("影响：A crash can lose user data."));
-        assert!(comment_body.contains("修复建议：Persist first, then return success."));
+        assert!(comment_body.starts_with("<!-- astrcode-auto-review -->\n**[P1]"));
+        assert!(comment_body.contains("**[P1] Persist storage before returning**"));
+        assert!(comment_body.contains("**影响**：A crash can lose user data."));
+        assert!(comment_body.contains("**建议**：Persist first, then return success."));
         assert!(body.contains("已发布行内评论：1"));
         assert!(body.contains("暂无法定位的发现：0"));
         assert!(body.contains("已审查文件：1/1"));
@@ -1105,11 +1102,245 @@ One concrete finding and one repo-history reminder.
         let body =
             inline_review_comment_body(&config, &validated_finding("P2", "持久化顺序错误", 10));
 
-        assert!(body.contains("类别：Correctness"));
-        assert!(body.contains("证据："));
-        assert!(body.contains("问题："));
-        assert!(body.contains("修复建议："));
+        assert!(body.contains("**[P2] 持久化顺序错误**"));
+        assert!(body.contains("**依据**："));
+        assert!(body.contains("**影响**："));
+        assert!(body.contains("**建议**："));
+        assert!(body.find("**依据**").unwrap() < body.find("<details>").unwrap());
         assert!(!body.contains("Category:"));
+    }
+
+    #[test]
+    fn github_markdown_preserves_blocks_and_escapes_metadata() {
+        let mut finding = validated_finding("P2", "状态 **错误**\n# 下一行 <tag>", 10);
+        finding.path = "src/a`b.rs".into();
+        finding.project_context.clear();
+        for evidence in [
+            "- 第一项\n- 第二项",
+            "1. 第一步\n2. 第二步",
+            "```rust\nreturn Err(error);\n```",
+            "> 触发条件成立",
+            "| 条件 | 结果 |\n|---|---|\n| 重试 | 失败 |",
+        ] {
+            finding.evidence = evidence.into();
+            let body = review_comments::finding(&finding);
+            assert!(body.contains(&format!("**依据**\n\n{evidence}\n")));
+            assert!(!body.contains("<details>"));
+            assert!(!body.contains("\n# 下一行"));
+            assert!(body.contains("\\*\\*错误\\*\\*"));
+            assert!(body.contains("&lt;tag&gt;"));
+        }
+        assert!(review_comments::finding_details(&finding).contains("`` src/a`b.rs:10 · RIGHT ``"));
+        let long_path = format!("src/{}  name.rs", "a".repeat(510));
+        assert_eq!(review_comments::code(&long_path), format!("`{long_path}`"));
+        let mut folded = "前一段".to_owned();
+        review_comments::fold(&mut folded, "A < B & C", "- 内容");
+        assert!(folded.contains("前一段\n\n<details>"));
+        assert!(folded.contains("<summary>A &lt; B &amp; C</summary>\n\n- 内容\n\n</details>"));
+
+        let mut raw = json!({
+            "schema_version":3,"input_key":"fixture","repo":"example/repo","pr_number":1,
+            "base_sha":"aaaa","head_sha":"bbbb","model":{},"pipeline":"quality_first","status":"partial",
+            "review": {"inline_findings":[],"summary_findings":[finding, finding],
+                "unplaced_findings":[],"observations":[],"investigation_log":[],
+                "verification":[],"residual_risk":[],"summary":null,"coverage":null,"debug_dir":null},
+            "stages":[]
+        });
+        for (checks, expected) in [
+            (json!([]), "未记录实际执行的检查"),
+            (
+                json!([{"command":"cargo test","status":"passed"}]),
+                "1 项确定性检查通过",
+            ),
+            (
+                json!([{"command":"echo `x`","status":"failed","notes":"第一行\n\n```text\nerror\n```"}]),
+                "- `` echo `x` `` · failed\n  \n  第一行",
+            ),
+        ] {
+            raw["review"]["verification"] = checks;
+            let body = render_review_result(&raw.to_string()).unwrap();
+            assert!(body.contains(expected), "{body}");
+            assert!(!body.contains("不要汇总"));
+            assert!(!body.contains("模型用量与耗时"));
+            assert!(body.contains("其他发现与建议（2）"));
+            assert!(body.contains("\n\n---\n\n"));
+        }
+        raw["stages"] = json!([{
+            "label":"file | <x>\nextra","input_key":"fixture","session_id":"fixture",
+            "started_at":0,"elapsed_seconds":3,"status":"complete","error":null,
+            "usage":{"input_tokens":10,"cached_input_tokens":4,"cache_creation_input_tokens":0,
+                "uncached_input_tokens":6,"output_tokens":2,"reasoning_output_tokens":0,
+                "requests":1,"tool_calls":0,"estimated_requests":0,"unknown_accounting_requests":0,"missing_usage_requests":0}
+        }]);
+        let body = render_review_result(&raw.to_string()).unwrap();
+        assert!(body.contains("| file \\| &lt;x&gt; extra | complete | 输入 10<br>缓存输入 4<br>输出 2 | 请求 1<br>工具 0<br>3 秒 |"));
+    }
+
+    #[test]
+    fn comments_preserve_evidence_and_label_uncertainty_without_repeated_metadata() {
+        let config = Config::default();
+        for (kind, confidence, uncertain) in [
+            (FindingKind::Confirmed, "high", false),
+            (FindingKind::Advisory, "high", true),
+            (FindingKind::Confirmed, "medium", true),
+        ] {
+            let mut finding = validated_finding("P2", "写入前不能报告成功", 10);
+            finding.kind = kind;
+            finding.confidence = confidence.into();
+            finding.evidence = "`write.rs:10` 在返回前没有执行持久化；调用方没有补写路径。".into();
+            let body = inline_review_comment_body(&config, &finding);
+            let visible = body.split("<details>").next().unwrap();
+            for fact in [
+                &finding.issue,
+                &finding.impact,
+                &finding.evidence,
+                &finding.fix,
+            ] {
+                assert!(visible.contains(fact));
+            }
+            assert_eq!(visible.contains("待核实建议"), uncertain);
+            assert!(body.contains(&finding.project_context));
+            assert_eq!(body.matches(&finding.evidence).count(), 1);
+            assert!(!body.contains(AGENT_LINE));
+            assert!(!is_trigger_comment(
+                &config,
+                "VitaDynamics/Vvbot",
+                &comment_by(1, "whatevertogo", &format!("{body} @whatevertogo"))
+            ));
+        }
+        for response in [
+            "<files_reviewed>src/client.py</files_reviewed><finding kind=\"confirmed\" priority=\"P3\" confidence=\"high\" title=\"无标题\"></finding><summary>没有发现缺陷</summary>".to_owned(),
+            json!({"files_reviewed":["src/client.py"],"confirmed_findings":[{"title":"无标题","issue":" "}],"summary":"没有发现缺陷"}).to_string(),
+        ] {
+            let parsed=parse_review_bot_output(&response).unwrap();
+            assert!(parsed.confirmed_findings.is_empty());
+            assert_eq!(parsed.files_reviewed,["src/client.py"]);
+        }
+        for finding in [
+            json!({"title":"初始化失败后没有重试路径"}),
+            json!({"title":"无标题","evidence":"caller.rs:12 has no retry"}),
+        ] {
+            let response = json!({"advisory_findings":[finding]}).to_string();
+            assert_eq!(
+                parse_review_bot_output(&response)
+                    .unwrap()
+                    .advisory_findings
+                    .len(),
+                1
+            );
+        }
+        let examples = parse_review_bot_output(PR_REVIEW_FEW_SHOTS_PROMPT).unwrap();
+        assert_eq!(examples.confirmed_findings.len(), 1);
+        assert_eq!(examples.observations.len(), 1);
+        assert_eq!(
+            examples.confirmed_findings[0].path.as_deref(),
+            Some("src/enqueue.rs")
+        );
+    }
+
+    #[test]
+    fn report_fallback_and_publication_receipts_do_not_overstate_success() {
+        let config = Config::default();
+        let trigger = ReviewTrigger {
+            repo: "owner/repo".into(),
+            pr: pr(),
+            kind: ReviewTriggerKind::NewPullRequest,
+        };
+        let first = validated_finding("P1", "第一个问题", 10);
+        let second = validated_finding("P2", "第二个问题", 11);
+        let published = PublishedReview {
+            url: None,
+            inline_review_url: Some("https://github.test/review/1".into()),
+            inline_review_id: Some(1),
+            summary_body: String::new(),
+            inline_comments_posted: 1,
+            unplaced_findings_count: 1,
+            highest_risk: Some("P1 第一个问题".into()),
+            verification: Vec::new(),
+            posted_findings: vec![finding_memory_from_validated(
+                &second,
+                &trigger.pr.head_ref_oid,
+            )],
+        };
+        let mut review = ValidatedReview {
+            inline_findings: vec![first.clone(), second.clone()],
+            summary_findings: Vec::new(),
+            unplaced_findings: Vec::new(),
+            observations: Vec::new(),
+            investigation_log: Vec::new(),
+            verification: Vec::new(),
+            residual_risk: Vec::new(),
+            summary: None,
+            coverage: None,
+            debug_dir: None,
+        };
+        let prompt = final_comment_report_prompt(&trigger, &review, &published);
+        assert!(prompt.contains("仅总结发现：1"));
+        let posted = prompt
+            .split("实际已发布的行内发现：")
+            .nth(1)
+            .unwrap()
+            .split("仅总结的发现：")
+            .next()
+            .unwrap();
+        assert!(posted.contains(&second.title));
+        assert!(!posted.contains(&first.title));
+        let unposted = prompt
+            .split("仅总结的发现：")
+            .nth(1)
+            .unwrap()
+            .split("无法定位的发现说明：")
+            .next()
+            .unwrap();
+        assert!(unposted.contains(&first.title));
+        assert!(unposted.contains(&first.issue));
+        for (covered, checks, partial) in [
+            (false, vec![], true),
+            (true, vec![], true),
+            (
+                true,
+                vec![VerificationItem {
+                    command: Some("cargo check".into()),
+                    status: Some("failed".into()),
+                    notes: Some("linker unavailable".into()),
+                }],
+                true,
+            ),
+            (
+                true,
+                vec![VerificationItem {
+                    command: Some("cargo check".into()),
+                    status: Some("passed".into()),
+                    notes: None,
+                }],
+                false,
+            ),
+        ] {
+            review.verification = checks;
+            review.coverage = covered.then(|| {
+                let mut c = ReviewCoverage::default();
+                c.mark("src/storage.rs", CoverageStatus::Reviewed, "reviewed");
+                c
+            });
+            let fallback =
+                fallback_final_report(&review, &published, Some("report formatter failed"));
+            let body = final_review_comment_body(
+                &config, &trigger, "session", &review, &published, &fallback,
+            );
+            assert_eq!(body.contains("**部分完成**"), partial);
+            assert!(body.contains(&first.evidence));
+            assert!(body.contains(&first.fix));
+            assert!(!body.contains("未发现确认的阻塞问题"));
+            assert!(!body.contains("## 合并评估"));
+            assert!(body.find("第一个问题").unwrap() < body.find("审查会话").unwrap());
+        }
+        review.inline_findings.clear();
+        review
+            .unplaced_findings
+            .push(unplaced_from_validated(first, "line unavailable".into()));
+        let fallback = fallback_final_report(&review, &published, None);
+        assert!(fallback.contains("未能定位或完整验证"));
+        assert!(!fallback.contains("未发现需要修复"));
     }
 
     #[test]

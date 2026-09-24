@@ -955,7 +955,7 @@ fn file_review_prompt(
 - 不要发布 GitHub 评论。
 - 已检查的每个分片文件都必须列入 `<files_reviewed>`。
 - 可执行问题放进 `<finding>` 标签；不要创建 `verification` 项或“通过”的审查备注。
-- 按影响而不是按类别评级；影响合并质量的 API 契约、可靠性和测试风险可以是 P1/P2。
+- 严重程度与置信程度分别判断；缺测试或设计顾虑不能直接当作已确认缺陷。
 - 仓库 instructions 是审查政策。只有插件协议不可变：不要自行写 GitHub 评论，机器可读项必须放进内置标签。
 
 审查者档案：
@@ -1055,7 +1055,7 @@ fn global_review_prompt(
 - 不要重复文件审查阶段已经发现的问题。
 - 不要发布 GitHub 评论。
 - 可执行问题放进 `<finding>` 标签；不要创建 `verification` 项或“通过”的审查备注。
-- 按影响而不是按类别评级；影响合并质量的 API 契约、可靠性和测试风险可以是 P1/P2。
+- 严重程度与置信程度分别判断；缺测试或设计顾虑不能直接当作已确认缺陷。
 - 仓库 instructions 是审查政策。只有插件协议不可变：不要自行写 GitHub 评论，机器可读项必须放进内置标签。
 
 仓库级指令：
@@ -1701,7 +1701,7 @@ Few-shot examples:
     let response_instruction = if is_review_task {
         "使用简体中文编写简洁 Markdown；每个可执行问题都放进 <finding> 标签，已检查文件列入 <files_reviewed>。不要自行发布 GitHub 评论；插件会校验标签并发布行内评论。"
     } else {
-        "只返回可直接发布到 GitHub 的简体中文 Markdown。"
+        "只返回可直接发布到 GitHub 的简体中文 Markdown。先直接回答原问题，关键判断紧接实际依据，并说明未完成的验证；不套完整审查模板，不写夸大的结论或调查流水账。"
     };
     format!(
         r##"{AGENT_LINE}
@@ -2206,27 +2206,17 @@ fn review_comment_body(
     session_id: &str,
     review: &str,
 ) -> String {
-    let trigger_line = match trigger.comment() {
-        Some(comment) => format!("触发评论：`{}`", comment.id),
-        None => "触发：新 PR 自动审查".into(),
-    };
-    format!(
-        r#"{marker}
-{AGENT_LINE}
-
-审查会话：`{session_id}`
-{trigger_line}
-Head SHA：`{sha}`
-
-{review}
-"#,
-        marker = config.comment_marker,
-        AGENT_LINE = AGENT_LINE,
-        session_id = session_id,
-        trigger_line = trigger_line,
-        sha = trigger.pr.head_ref_oid,
-        review = review.trim(),
-    )
+    let mut body = format!(
+        "{}\n{AGENT_LINE}\n\n{}\n",
+        config.comment_marker,
+        review.trim()
+    );
+    review_comments::fold(
+        &mut body,
+        "执行信息",
+        &review_comments::metadata(trigger, session_id),
+    );
+    body
 }
 
 fn post_auto_review_start_comment(
@@ -2350,13 +2340,13 @@ async fn parse_or_repair_review_output(
 fn parse_review_bot_output(text: &str) -> Result<ReviewBotOutput> {
     let json_error = match extract_json_object(text) {
         Some(candidate) => match serde_json::from_str(candidate) {
-            Ok(output) => return Ok(output),
+            Ok(output) => return Ok(remove_empty_finding_placeholders(output)),
             Err(error) => Some(error),
         },
         None => None,
     };
     match parse_tagged_review_output(text) {
-        Ok(output) => Ok(output),
+        Ok(output) => Ok(remove_empty_finding_placeholders(output)),
         Err(tag_error) => match json_error {
             Some(error) => Err(error).with_context(|| {
                 format!(
@@ -2367,6 +2357,30 @@ fn parse_review_bot_output(text: &str) -> Result<ReviewBotOutput> {
             None => Err(tag_error),
         },
     }
+}
+
+// Ignore only empty protocol scaffolding. Partial findings with any substantive
+// content still pass through normal validation, and raw model output is retained.
+fn remove_empty_finding_placeholders(mut output: ReviewBotOutput) -> ReviewBotOutput {
+    let keep = |finding: &ReviewFinding| {
+        let title = finding.title.as_deref().unwrap_or("").trim();
+        let placeholder = ["", "无标题", "untitled", "untitled finding"]
+            .iter()
+            .any(|value| title.eq_ignore_ascii_case(value));
+        !placeholder
+            || [
+                &finding.issue,
+                &finding.evidence,
+                &finding.project_context,
+                &finding.impact,
+                &finding.fix,
+            ]
+            .iter()
+            .any(|value| value.as_deref().is_some_and(|text| !text.trim().is_empty()))
+    };
+    output.confirmed_findings.retain(keep);
+    output.advisory_findings.retain(keep);
+    output
 }
 
 #[derive(Debug)]
@@ -2852,7 +2866,7 @@ async fn post_final_structured_report(
             Ok(report) => report,
             Err(error) => fallback_final_report(validated, published, Some(&format!("{error:#}"))),
         };
-    let body = final_review_comment_body(config, trigger, session_id, published, &report);
+    let body = final_review_comment_body(config, trigger, session_id, validated, published, &report);
     write_debug_artifact(
         validated.debug_dir.as_deref(),
         "final-comment-body.md",
@@ -2905,10 +2919,15 @@ fn final_comment_report_prompt(
     validated: &ValidatedReview,
     published: &PublishedReview,
 ) -> String {
-    let inline = validated
-        .inline_findings
-        .iter()
-        .take(published.inline_comments_posted)
+    let (posted, unposted): (Vec<_>, Vec<_>) =
+        validated.inline_findings.iter().partition(|finding| {
+            published
+                .posted_findings
+                .iter()
+                .any(|receipt| receipt.fingerprint == finding_fingerprint(finding))
+        });
+    let summary_only_count = validated.summary_findings.len() + unposted.len();
+    let inline = posted.into_iter()
         .map(|finding| {
             format!(
                 "- [{}][{}][{}] {} `{}`:{} — {}\n  证据：{}\n  问题：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
@@ -2928,13 +2947,10 @@ fn final_comment_report_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let summary_only = validated
-        .summary_findings
-        .iter()
-        .take(12)
+    let summary_only = unposted.into_iter().chain(&validated.summary_findings)
         .map(|finding| {
             format!(
-                "- [{}][{}][{}] {} `{}`:{} — {}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
+                "- [{}][{}][{}] {} `{}`:{} — {}\n  问题：{}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
                 finding.priority,
                 finding.kind.as_str(),
                 finding.confidence,
@@ -2942,6 +2958,7 @@ fn final_comment_report_prompt(
                 finding.path,
                 finding.line,
                 finding.title,
+                one_line(&finding.issue),
                 one_line(&finding.evidence),
                 one_line(&finding.project_context),
                 one_line(&finding.impact),
@@ -2953,7 +2970,6 @@ fn final_comment_report_prompt(
     let unplaced = validated
         .unplaced_findings
         .iter()
-        .take(8)
         .map(|finding| {
             format!(
                 "- [{}][{}][{}] {}: {}",
@@ -2965,7 +2981,6 @@ fn final_comment_report_prompt(
     let observations = validated
         .observations
         .iter()
-        .take(10)
         .map(|observation| {
             format!(
                 "- [{}][{}] {}{}{}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  下一步：{}",
@@ -2975,7 +2990,10 @@ fn final_comment_report_prompt(
                     .and_then(normalize_confidence)
                     .unwrap_or_else(|| "low".into()),
                 observation.category.as_deref().unwrap_or("Observation"),
-                observation.title.as_deref().unwrap_or("Untitled observation"),
+                observation
+                    .title
+                    .as_deref()
+                    .unwrap_or("Untitled observation"),
                 observation
                     .path
                     .as_deref()
@@ -3032,20 +3050,17 @@ fn final_comment_report_prompt(
 
 请为 {repo} PR #{pr_number}「{title}」撰写最终 GitHub PR 审查报告。
 
+评论表达规范：
+{style}
+
 规则：
-- 只返回严格 JSON：{{"report":"...markdown..."}}。
-- 报告所有自然语言必须使用简体中文，并采用原 reviewnow 的风格：明确范围、验证、发现、合并评估、低置信度观察、做了什么、下一步建议和剩余风险。
-- 不要包含 HTML marker、agent 身份行、审查会话、触发信息或 Head SHA；插件会添加它们。
-- 只使用四个固定审查角度：Correctness、Security、Reliability/Performance、Tests/API Contract。
-- 内容必须具体，并以以下数据为依据；不要虚构代码事实、命令、行号或风险。
-- 存在行内发现时，写 `## 发现`，逐项概述优先级、文件/行、视角、问题、影响和修复建议。
-- P1/P2 的仅总结发现也放在 `## 发现`，并明确说明未能行内评论的原因。
-- P3 的仅总结发现或 observation 放到 `## 设计提醒` 或 `## 低置信度观察`，不要假装没有发现。
-- 没有行内发现时，要说明是有仅总结的风险/观察，还是确实没有有价值的风险。
-- `## 验证` 只写失败、跳过或有意义的检查，不要堆砌“通过”的样板文字。
-- 必须包含 `## 合并评估`、`## 做了什么`、`## 下一步建议` 和 `## 剩余风险`。
-- 低置信度观察必须清晰标注，且确实有用。
-- 不要让用户运行 GitHub API 命令；插件已经处理行内评论。
+- 只返回严格 JSON：{{"report":"...markdown..."}}，不调用工具或重新调查。
+- 首段直接给出与已审范围相符的结论；未审、失败或未执行验证时说明限制。没有问题时写“在已审范围内未发现需要修复的问题”，不批准合并。
+- 已有行评只列优先级、简短问题和位置，避免复制整条行评。待核实建议与确定问题分开；不能把“没发出行评”等同于“没有问题”。
+- 仅总结的问题保留触发条件、影响、依据与最小修复方向。未确认的前提必须明确标注，不提高置信度，不虚构命令、代码事实或验证结果。
+- 详细证据、覆盖、检查结果和剩余风险放入有内容的 <details>；没有内容就省略，不填“无”占位。
+- 不强制生成“合并评估”“做了什么”等重复章节，不另造行动清单。通常几段或几条列表即可，关键证据不能省掉。
+- 不包含 marker、身份行、会话或 SHA；插件会添加。不要让用户再运行 GitHub API 命令。
 
 审查结果：
 - 覆盖范围：{coverage}
@@ -3096,6 +3111,7 @@ fn final_comment_report_prompt(
 {residual}
 ```
 "#,
+        style = COMMENT_STYLE_PROMPT,
         AGENT_LINE = AGENT_LINE,
         repo = trigger.repo,
         pr_number = trigger.pr.number,
@@ -3103,12 +3119,16 @@ fn final_comment_report_prompt(
         coverage = coverage,
         inline_count = published.inline_comments_posted,
         inline_reference = inline_reference,
-        summary_only_count = validated.summary_findings.len(),
+        summary_only_count = summary_only_count,
         observation_count = validated.observations.len(),
         unplaced_count = published.unplaced_findings_count,
         highest_risk = published.highest_risk.as_deref().unwrap_or("无"),
         changed_files = changed_files,
-        inline = if inline.trim().is_empty() { "无" } else { &inline },
+        inline = if inline.trim().is_empty() {
+            "无"
+        } else {
+            &inline
+        },
         summary_only = if summary_only.trim().is_empty() {
             "无"
         } else {
@@ -3175,49 +3195,40 @@ fn final_review_comment_body(
     config: &Config,
     trigger: &ReviewTrigger,
     session_id: &str,
+    validated: &ValidatedReview,
     published: &PublishedReview,
     report: &str,
 ) -> String {
-    let trigger_line = match trigger.comment() {
-        Some(comment) => format!("Trigger comment: `{}`", comment.id),
-        None => "Trigger: new PR auto review".into(),
-    };
-    let inline_line = if published.inline_comments_posted > 0 {
-        match (published.inline_review_id, published.inline_review_url.as_deref()) {
-            (Some(id), Some(url)) => {
-                format!("行内评论已发布（ID {id}，[查看审查]({url})）。以下是我的总结。")
-            },
-            (Some(id), None) => format!("行内评论已发布（ID {id}）。以下是我的总结。"),
-            (None, Some(url)) => format!("行内评论已发布（[查看审查]({url})）。以下是我的总结。"),
-            (None, None) => "行内评论已发布。以下是我的总结。".into(),
-        }
-    } else if published.unplaced_findings_count > 0 {
-        "没有成功发布行内评论；相关发现已放入总结。以下是我的总结。".into()
+    let status = if review_comments::is_partial(validated) {
+        "部分完成"
     } else {
-        "未发现需要发布的行内评论。以下是我的总结。".into()
+        "审查完成"
     };
-    format!(
-        r#"{marker}
-{AGENT_LINE}
-
-审查会话：`{session_id}`
-{trigger_line}
-Head SHA：`{sha}`
-
-{inline_line}
-
----
-
-{report}
-"#,
-        marker = config.comment_marker,
-        AGENT_LINE = AGENT_LINE,
-        session_id = session_id,
-        trigger_line = trigger_line,
-        sha = trigger.pr.head_ref_oid,
-        inline_line = inline_line,
-        report = report.trim(),
-    )
+    let sha = &trigger.pr.head_ref_oid;
+    let mut body = format!(
+        "{}\n{AGENT_LINE}\n\n**{status}** · 审查版本 `{}`\n\n{}\n",
+        config.comment_marker,
+        &sha[..sha.len().min(12)],
+        report.trim()
+    );
+    if let Some(url) = &published.inline_review_url {
+        body.push_str(&format!(
+            "\n[查看 {} 条行评]({url})\n",
+            published.inline_comments_posted
+        ));
+    }
+    if published.unplaced_findings_count > 0 {
+        body.push_str(&format!(
+            "\n{} 个问题未能行内定位或发布，请查看报告中的证据与限制。\n",
+            published.unplaced_findings_count
+        ));
+    }
+    review_comments::fold(
+        &mut body,
+        "执行信息",
+        &review_comments::metadata(trigger, session_id),
+    );
+    body
 }
 
 fn fallback_final_report(
@@ -3225,188 +3236,65 @@ fn fallback_final_report(
     published: &PublishedReview,
     generation_error: Option<&str>,
 ) -> String {
-    let posted_findings = validated
+    let mut body = review_comments::conclusion(validated);
+    body.push('\n');
+    for finding in &validated.inline_findings {
+        body.push_str(&review_comments::finding_index(finding));
+    }
+    body.push('\n');
+    // The finding order need not match successful publication order. Retain all evidence.
+    let findings = validated
         .inline_findings
         .iter()
-        .take(published.inline_comments_posted)
-        .map(|finding| {
-            format!(
-                "### [{}][{}][{}] {}\n- **文件:** `{}`:{}\n- **视角:** {}\n- **问题:** {}\n- **证据:** {}\n- **项目上下文:** {}\n- **影响:** {}\n- **修复:** {}",
-                finding.priority,
-                finding.kind.as_str(),
-                finding.confidence,
-                finding.title,
-                finding.path,
-                finding.line,
-                finding.category,
-                one_line(&finding.issue),
-                one_line(&finding.evidence),
-                one_line(&finding.project_context),
-                one_line(&finding.impact),
-                one_line(&finding.fix),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let summary_findings = validated
-        .summary_findings
-        .iter()
-        .take(10)
-        .map(|finding| {
-            format!(
-                "- [{}][{}][{}] `{}`:{} {}：{} 建议：{}",
-                finding.priority,
-                finding.kind.as_str(),
-                finding.confidence,
-                finding.path,
-                finding.line,
-                finding.title,
-                one_line(&finding.issue),
-                one_line(&finding.fix),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let unplaced = validated
-        .unplaced_findings
-        .iter()
-        .take(10)
-        .map(|finding| {
-            let location = match (&finding.path, &finding.side, finding.line) {
-                (Some(path), Some(side), Some(line)) => format!(" `{path}` {side} {line}"),
-                (Some(path), _, _) => format!(" `{path}`"),
-                _ => String::new(),
-            };
-            format!(
-                "- [{}][{}][{}]{} {}：{}",
-                finding.priority,
-                finding.kind,
-                finding.confidence,
-                location,
-                finding.title,
-                finding.reason
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .chain(&validated.summary_findings)
+        .map(review_comments::finding_details)
+        .collect::<Vec<_>>();
+    review_comments::fold_items(&mut body, "发现与建议的完整依据", &findings);
     let observations = validated
         .observations
         .iter()
-        .take(10)
-        .map(|observation| {
+        .map(review_comments::observation)
+        .collect::<Vec<_>>();
+    review_comments::fold_items(&mut body, "待核实的观察", &observations);
+    let unplaced = validated
+        .unplaced_findings
+        .iter()
+        .map(|finding| {
             format!(
-                "- [{}][{}] {}{}{}：{} 下一步：{}",
-                observation.confidence.as_deref().unwrap_or("low"),
-                observation.category.as_deref().unwrap_or("Observation"),
-                observation.title.as_deref().unwrap_or("未命名观察"),
-                observation
-                    .path
-                    .as_deref()
-                    .map(|path| format!(" `{path}`"))
-                    .unwrap_or_default(),
-                observation
-                    .line
-                    .map(|line| format!(":{line}"))
-                    .unwrap_or_default(),
-                one_line(observation.impact.as_deref().unwrap_or("")),
-                one_line(observation.next_step.as_deref().unwrap_or("")),
+                "- [{}] {}：{}",
+                finding.priority, finding.title, finding.reason
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let findings = if posted_findings.trim().is_empty() {
-        "未发布 inline 确认问题。".into()
-    } else {
-        posted_findings
-    };
-    let design_reminders = [summary_findings.as_str(), unplaced.as_str()]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
+    review_comments::fold(&mut body, "无法行内定位的问题", &unplaced);
+    review_comments::fold(
+        &mut body,
+        "覆盖范围",
+        &coverage_summary_for_comment(validated.coverage.as_ref()),
+    );
+    review_comments::fold(
+        &mut body,
+        "验证结果",
+        &verification_summary(&validated.verification),
+    );
+    let mut residual = validated
+        .residual_risk
+        .iter()
+        .map(|risk| format!("- {risk}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let design_reminders = if design_reminders.trim().is_empty() {
-        "- 无 summary-only 或无法定位的发现。".into()
-    } else {
-        design_reminders
-    };
-    let observations = if observations.trim().is_empty() {
-        "- 无低置信度观察。".into()
-    } else {
-        observations
-    };
-    let coverage = coverage_summary_for_comment(validated.coverage.as_ref());
-    let verification = verification_summary(&validated.verification);
-    let residual = if validated.residual_risk.is_empty() {
-        "- 无额外剩余风险。".into()
-    } else {
-        validated
-            .residual_risk
-            .iter()
-            .map(|risk| format!("- {risk}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let generation_note = generation_error
-        .map(|error| format!("\n\n> 最终报告生成降级：{}", one_line(error)))
-        .unwrap_or_default();
-    format!(
-        r#"# 代码审查
-
-## 范围
-
-本次审查覆盖了当前 PR diff，并按 Correctness、Security、Reliability/Performance、Tests/API Contract 四个角度检查。
-
-## 验证
-
-{verification}
-
-## 发现
-
-{findings}
-
-## 设计提醒
-
-{design_reminders}
-
-## 低置信度观察
-
-{observations}
-
-## 合并评估
-
-总体：{assessment}
-
-## 做了什么
-
-完成覆盖优先审查并发布 {inline_count} 条行内评论；未能定位到 diff 行的发现数为 {unplaced_count}。
-
-## 下一步建议
-
-1. 优先处理行内评论中的 P0/P1/P2 问题。
-2. 如果需要风格或细节审查，可以评论 `@whatevertogo nitpick review` 重新触发。
-
-## 剩余风险
-
-{residual}
-
-## 覆盖范围
-
-{coverage}{generation_note}"#,
-        verification = verification,
-        findings = findings,
-        design_reminders = design_reminders,
-        observations = observations,
-        assessment = if published.inline_comments_posted == 0 {
-            "未发现确认的阻塞问题"
-        } else {
-            "需要处理已发布的 inline findings"
-        },
-        inline_count = published.inline_comments_posted,
-        unplaced_count = published.unplaced_findings_count,
-        residual = residual,
-        coverage = coverage,
-        generation_note = generation_note,
-    )
+    if generation_error.is_some() {
+        residual.push_str("\n- 报告整理未完成，以上直接呈现已保存的审查结果，未追加新的结论。");
+    }
+    if published.unplaced_findings_count > 0 {
+        residual.push_str(&format!(
+            "\n- {} 个问题未能行内定位或发布。",
+            published.unplaced_findings_count
+        ));
+    }
+    review_comments::fold(&mut body, "剩余风险", &residual);
+    body
 }
 
 fn publish_structured_review(
@@ -3704,32 +3592,24 @@ fn inline_review_batch_body(
     unplaced_count: usize,
     highest_risk: Option<&str>,
 ) -> String {
-    let trigger_line = match trigger.comment() {
-        Some(comment) => format!("触发评论：`{}`", comment.id),
-        None => "触发：新 PR 自动审查".into(),
-    };
-    format!(
-        r#"{marker}
-{AGENT_LINE}
-
-审查会话：`{session_id}`
-{trigger_line}
-Head SHA：`{sha}`
-
-已发布 {inline_comments_posted} 条行内审查评论。最终总结将作为单独评论发布。
-
-- 最高风险：{highest_risk}
-- 暂无法定位的发现：{unplaced_count}
-"#,
-        marker = config.comment_marker,
-        AGENT_LINE = AGENT_LINE,
-        session_id = session_id,
-        trigger_line = trigger_line,
-        sha = trigger.pr.head_ref_oid,
-        inline_comments_posted = inline_comments_posted,
-        highest_risk = highest_risk.unwrap_or("无"),
-        unplaced_count = unplaced_count,
-    )
+    let mut body = format!(
+        "{}\n{AGENT_LINE}\n\n本次包含 {inline_comments_posted} 条行评。\n",
+        config.comment_marker
+    );
+    if let Some(risk) = highest_risk {
+        body.push_str(&format!("\n优先关注：{risk}。\n"));
+    }
+    if unplaced_count > 0 {
+        body.push_str(&format!(
+            "\n{unplaced_count} 个问题将连同定位限制保留在总览中。\n"
+        ));
+    }
+    review_comments::fold(
+        &mut body,
+        "执行信息",
+        &review_comments::metadata(trigger, session_id),
+    );
+    body
 }
 
 fn inline_review_single_fallback_body(
@@ -3738,30 +3618,16 @@ fn inline_review_single_fallback_body(
     session_id: &str,
     finding: &ValidatedFinding,
 ) -> String {
-    let trigger_line = match trigger.comment() {
-        Some(comment) => format!("触发评论：`{}`", comment.id),
-        None => "触发：新 PR 自动审查".into(),
-    };
-    format!(
-        r#"{marker}
-{AGENT_LINE}
-
-审查会话：`{session_id}`
-{trigger_line}
-Head SHA：`{sha}`
-
-批量 GitHub Review 请求被拒绝，正在降级为逐条发布行内评论。
-
-- 发现：[{priority}] {title}
-"#,
-        marker = config.comment_marker,
-        AGENT_LINE = AGENT_LINE,
-        session_id = session_id,
-        trigger_line = trigger_line,
-        sha = trigger.pr.head_ref_oid,
-        priority = finding.priority,
-        title = finding.title,
-    )
+    let mut body = format!(
+        "{}\n{AGENT_LINE}\n\n本条行评：**[{}] {}**\n",
+        config.comment_marker, finding.priority, finding.title
+    );
+    review_comments::fold(
+        &mut body,
+        "执行信息",
+        &review_comments::metadata(trigger, session_id),
+    );
+    body
 }
 
 fn post_pull_review(
@@ -3825,30 +3691,9 @@ fn pull_review_payload(
 
 fn inline_review_comment_body(config: &Config, finding: &ValidatedFinding) -> String {
     format!(
-        r#"{marker}
-{AGENT_LINE}
-
-[{priority}][{kind}][{confidence} 置信度] {title}
-
-类别：{category}
-证据：{evidence}
-问题：{issue}
-项目上下文：{project_context}
-影响：{impact}
-修复建议：{fix}
-"#,
-        marker = config.comment_marker,
-        AGENT_LINE = AGENT_LINE,
-        priority = finding.priority.as_str(),
-        kind = finding.kind.as_str(),
-        confidence = finding.confidence.as_str(),
-        title = finding.title.as_str(),
-        category = finding.category.as_str(),
-        evidence = finding.evidence.as_str(),
-        issue = finding.issue.as_str(),
-        project_context = finding.project_context.as_str(),
-        impact = finding.impact.as_str(),
-        fix = finding.fix.as_str(),
+        "{}\n{}",
+        config.comment_marker,
+        review_comments::finding(finding)
     )
 }
 
@@ -3957,7 +3802,7 @@ Head SHA：`{sha}`
 
 fn verification_summary(items: &[VerificationItem]) -> String {
     if items.is_empty() {
-        return "- 插件收集的 GitHub PR 上下文：通过".into();
+        return "- 未记录实际执行的检查；静态阅读不能替代编译或测试。".into();
     }
     let passed = items
         .iter()
@@ -3967,12 +3812,12 @@ fn verification_summary(items: &[VerificationItem]) -> String {
         .iter()
         .filter(|item| item.status.as_deref() != Some("passed"))
         .map(|item| {
-            format!(
-                "- `{}`: {} ({})",
-                item.command.as_deref().unwrap_or("未指定"),
-                item.status.as_deref().unwrap_or("未知"),
+            review_comments::list_item(&format!(
+                "{} · {}\n\n{}",
+                review_comments::code(item.command.as_deref().unwrap_or("未指定")),
+                review_comments::text(item.status.as_deref().unwrap_or("未知")),
                 item.notes.as_deref().unwrap_or("无备注")
-            )
+            ))
         })
         .collect::<Vec<_>>();
     if noteworthy.is_empty() {
