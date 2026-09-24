@@ -54,9 +54,14 @@ pub(super) fn get(endpoint: &str, etag: Option<&str>) -> Result<Reply> {
     }
     let (success, stdout, stderr) =
         command_output_with_timeout("gh", &args, None, Duration::from_secs(20))?;
-    let reply = parse_response(&stdout)
+    decode_response(success, &stdout, &stderr)
+}
+
+pub(super) fn decode_response(success: bool, stdout: &str, stderr: &str) -> Result<Reply> {
+    let reply = parse_response(stdout)
         .with_context(|| format!("GitHub request failed: {}", stderr.trim()))?;
-    if success && matches!(reply.status, 200..=299 | 304) {
+    // gh exits nonzero for HTTP 304 even though a conditional cache hit is successful.
+    if reply.status == 304 || (success && matches!(reply.status, 200..=299)) {
         return Ok(reply);
     }
     let now = now_epoch();

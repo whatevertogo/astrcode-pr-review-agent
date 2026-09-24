@@ -161,6 +161,22 @@ fn canonical_validation_rejects_deleted_closed_edited_and_forged_comments() {
     .unwrap();
     assert_eq!(cached.status, 304);
     assert_eq!(cached.headers["etag"], "abc");
+    let conditional = github::decode_response(
+        false,
+        "HTTP/2.0 304 Not Modified\r\nETag: abc\r\n\r\n",
+        "gh: HTTP 304",
+    )
+    .unwrap();
+    assert_eq!(conditional.status, 304);
+    for status in [401, 403, 404, 429, 500] {
+        let raw = format!(
+            "HTTP/2.0 {status} Error\r\nRetry-After: 180\r\n\r\n{{\"message\":\"fixture\"}}"
+        );
+        let error = github::decode_response(false, &raw, "gh: error")
+            .err()
+            .unwrap();
+        assert!(github::retry_at(&error, 0) >= now_epoch() + 179);
+    }
 }
 
 #[tokio::test]
