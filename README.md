@@ -12,7 +12,7 @@ analysis.
 
 ## Features
 
-- Polls configured repositories every 5 seconds by default.
+- Runs the serial model queue every 5 seconds by default; independent discovery workers keep receiving comments during long reviews.
 - Reacts to PR comments that mention the configured account, for example
   `@whatevertogo review it`.
 - Automatically reviews newly discovered open PRs once, without replaying all
@@ -61,7 +61,7 @@ cp extension.json ~/.astrcode/extensions/astrcode-pr-review-agent/
 }
 ```
 
-Restart Astrcodey after installing or updating the extension.
+Activate updates through the host extension reload endpoint (`POST /api/extensions/reload`) during an idle window. No host framework upgrade is required.
 
 ## Configuration
 
@@ -77,6 +77,8 @@ Important defaults:
 {
   "github_user": "whatevertogo",
   "repos": ["VitaDynamics/Vvbot", "whatevertogo/astrcodey"],
+  "mention_repos": ["VitaDynamics/Vvbot", "whatevertogo/astrcodey"],
+  "trusted_comment_authors": ["whatevertogo", "catDforD", "letr007", "united-pooh", "Soulter"],
   "mention": "@whatevertogo",
   "poll_interval_seconds": 5,
   "webhook_enabled": false,
@@ -97,6 +99,69 @@ findings. Advisory, lower-confidence, and overflow findings remain in the folded
 summary with their evidence. `max_inline_comments` limits inline comments (zero
 means no inline comments in this pipeline). Existing explicit pipeline choices
 are not migrated automatically.
+
+## Reliable comment receipt
+
+Only open PR conversation comments are eligible. Every entry point checks the
+canonical GitHub comment author, exact `@whatevertogo` mention, PR ownership and
+open state. Trusted authors may trigger in any accessible repository; all authors
+may trigger in `mention_repos`. Missing/null `mention_repos` inherits `repos`, while
+an explicit empty list grants no repository-wide comment permission. AstrBot is
+not a priority repository. New-PR automatic reviews still use only `repos`.
+Agent-marked replies are ignored; a human mentioning their own account is allowed.
+
+Independent discovery sources use no model calls:
+
+- Priority repositories: direct comment reads every 60 seconds, complete pagination
+  ordered by update time and a 10-minute overlap. The cursor advances only after
+  successful receipt of all candidates.
+- Trusted users: all available activity pages every 60 seconds, or the longer
+  `X-Poll-Interval`, with per-page ETags (conditional response caching). Event order
+  is not assumed. [GitHub activity](https://docs.github.com/en/rest/activity/events)
+  can lag 30 seconds to 6 hours and exposes only 30 days / 300 events; other users'
+  private activity can be invisible. Window gaps and API errors appear in status.
+- Global mention search: paginated every 120 seconds, with visible warnings for
+  incomplete results or GitHub's 1,000-result ceiling. The legacy
+  `mention_search_limit` field remains loadable but no longer truncates this scan.
+
+Each new source initially looks back 24 hours. Search retains this initial cutoff
+so delayed indexing can still recover older candidates. Sources have separate
+locks, checkpoints and backoff; a broken search cannot block direct receipt.
+
+```bash
+astrcode-pr-review-agent enqueue --comment-url 'https://github.com/OWNER/REPO/pull/123#issuecomment-456' --dry-run
+astrcode-pr-review-agent enqueue --comment-url 'https://github.com/OWNER/REPO/pull/123#issuecomment-456'
+astrcode-pr-review-agent status --comment-url 'https://github.com/OWNER/REPO/pull/123#issuecomment-456'
+astrcode-pr-review-agent status
+```
+
+The link bypasses discovery indexes, never authorization. `--dry-run` does not
+write files, react, or invoke a model. Receipt returns `queued`, `already_pending`,
+`running`, `already_processed`, or a rejection/failure reason. Ordinary requests
+such as explaining test failures retain their original text and conversation route.
+The eyes reaction means **durably received**, not model started; a reaction failure
+does not cancel or repeat the task. A processed comment is never rerun on edit.
+
+`mention-inbox/` contains immutable atomic receipts. Only the executor writes
+`state.json`, saving a pending task before deleting its receipt. Pending tasks are
+consumed directly after restart and revalidated before execution; deleted comments,
+removed mentions, revoked permission and closed PRs are recorded as aborted.
+`mention-retries/` records validation backoff; `mention-discovery/` records per-source
+success, errors, polling deadlines and upstream limitations. Corrupt review state
+stops processing instead of silently resetting the deduplication ledger.
+
+Webhook delivery envelopes are atomically saved in `webhook-inbox/`; the same live
+comment checks apply across repositories. Legacy JSONL spools, including previously
+claimed files, are migrated without discarding pending records. `discover` runs one
+due discovery pass for diagnostics; `poll` performs discovery and one executor pass.
+
+Before deployment, back up the binary, configuration and persistent data, check for
+active tasks, then atomically replace the binary and reload extensions. Preserve
+`coverage_first` and current host/model settings when deploying only trigger fixes.
+For rollback, stop new discovery by unloading this worker, restore the old binary
+and configuration, and reload. **Keep the newest state, inboxes and reply receipts**;
+never restore the old state snapshot. The old worker cannot consume new inbox files:
+retain them for replay by the fixed worker, and check status before manual recovery.
 
 ## Isolated single-run review
 

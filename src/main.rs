@@ -30,7 +30,15 @@ async fn run() -> Result<()> {
         }
         Some("poll") => {
             let config = Config::load_or_create()?;
+            astrcode_pr_review_agent::discover_once(&config)?;
             poll_once(&config).await
+        }
+        Some("enqueue") => {
+            astrcode_pr_review_agent::enqueue_cli(std::env::args().skip(2).collect())
+        }
+        Some("discover") => astrcode_pr_review_agent::discover_once(&Config::load_or_create()?),
+        Some("status") if std::env::args().len() > 2 => {
+            astrcode_pr_review_agent::mention_status_cli(std::env::args().skip(2).collect())
         }
         Some("status") => {
             let config = Config::load_or_create()?;
@@ -38,7 +46,7 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Some("help") | Some("--help") | Some("-h") => {
-            println!("usage: astrcode-pr-review-agent [s5r|poll|status|review --repo OWNER/REPO --pr NUMBER --output-dir PATH [--publish]]");
+            println!("usage: astrcode-pr-review-agent [s5r|poll|discover|status [--comment-url URL]|enqueue --comment-url URL [--dry-run]|review --repo OWNER/REPO --pr NUMBER --output-dir PATH [--publish]]");
             Ok(())
         }
         Some(other) => anyhow::bail!("unknown mode: {other}"),

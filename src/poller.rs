@@ -51,6 +51,7 @@ pub async fn poll_once(config: &Config) -> Result<()> {
 }
 
 pub async fn poll_forever(config: Config) {
+    let _discovery = mention::start_discovery(&config);
     loop {
         if let Err(error) = poll_once(&config).await {
             eprintln!("astrcode-pr-review-agent poll failed: {error:#}");
@@ -62,7 +63,7 @@ pub async fn poll_forever(config: Config) {
 async fn poll_inner(config: &Config, state: &mut State) -> Result<String> {
     ensure_gh_authenticated()?;
     let mut handled = 0usize;
-    let mut queued = 0usize;
+    let mut queued = mention::import_mentions(state)?;
     let mut auto_queued = 0usize;
     let mut skipped = 0usize;
     let run_info = ensure_astrcode_run_info()?;
@@ -76,65 +77,21 @@ async fn poll_inner(config: &Config, state: &mut State) -> Result<String> {
 
     let mut baselined = 0usize;
     if should_run_reconciliation(config, state) {
-        let mentioned_prs = mentioned_open_prs(config).unwrap_or_else(|error| {
-            eprintln!(
-                "failed to search globally mentioned PRs; skipping mention reconciliation this \
-                 cycle: {error:#}"
-            );
-            Vec::new()
-        });
-        let open_prs = configured_open_prs(config)?;
-        baselined = baseline_auto_review_repos(config, state, &open_prs)?;
-
-        for (repo, pr) in mentioned_prs {
-            let comments = match issue_comments_quick(&repo, pr.number) {
-                Ok(comments) => comments,
-                Err(error) => {
-                    eprintln!(
-                        "failed to read comments for {repo}#{}: {error:#}",
-                        pr.number
-                    );
-                    skipped += 1;
-                    continue;
-                },
-            };
-            for comment in comments {
-                if !is_trigger_comment(config, &repo, &comment) {
-                    skipped += 1;
-                    continue;
-                }
-                let key = processed_key(&repo, pr.number, comment.id);
-                let trigger = ReviewTrigger {
-                    repo: repo.clone(),
-                    pr: pr.clone(),
-                    kind: ReviewTriggerKind::MentionComment(comment),
-                };
-                match state
-                    .processed_comments
-                    .get(&key)
-                    .map(|record| record.status.as_str())
-                {
-                    None => {
-                        acknowledge_trigger(config, &trigger);
-                        enqueue_mention_trigger(state, &trigger)?;
+        match configured_open_prs(config) {
+            Ok(open_prs) => {
+                baselined = baseline_auto_review_repos(config, state, &open_prs)?;
+                for (repo, pr) in open_prs {
+                    if let Some(trigger) = enqueue_auto_review_trigger(config, state, &repo, &pr)? {
                         pending_triggers.push(trigger);
-                        queued += 1;
-                    },
-                    Some(STATUS_PENDING) => pending_triggers.push(trigger),
-                    Some(_) => {
-                        skipped += 1;
-                    },
+                        auto_queued += 1;
+                    }
                 }
+                state.last_reconciliation_at = Some(now_epoch());
             }
+            Err(error) => eprintln!(
+                "automatic PR discovery unavailable; saved mention tasks continue: {error:#}"
+            ),
         }
-
-        for (repo, pr) in open_prs {
-            if let Some(trigger) = enqueue_auto_review_trigger(config, state, &repo, &pr)? {
-                pending_triggers.push(trigger);
-                auto_queued += 1;
-            }
-        }
-        state.last_reconciliation_at = Some(now_epoch());
     }
 
     sort_pending_triggers(state, &mut pending_triggers);
@@ -151,7 +108,9 @@ async fn poll_inner(config: &Config, state: &mut State) -> Result<String> {
         ));
     }
 
-    if let Some(trigger) = pending_triggers.into_iter().next() {
+    let next =
+        mention::next_pending(config, state)?.or_else(|| pending_triggers.into_iter().next());
+    if let Some(trigger) = next {
         process_trigger(config, state, &run_info, trigger).await?;
         handled += 1;
     }
@@ -201,15 +160,17 @@ fn drain_webhook_events(
                 }
                 pending_triggers.push(trigger);
                 mark_queue_event_done(state, &event.id, "queued review trigger".into());
-            },
+            }
             Ok(None) => {
                 counts.skipped += 1;
                 mark_queue_event_done(state, &event.id, "event did not create review".into());
-            },
+            }
             Err(error) => {
                 counts.skipped += 1;
-                mark_queue_event_failed(state, &event.id, format!("{error:#}"));
-            },
+                if let Some(record) = state.event_queue.iter_mut().find(|r| r.id == event.id) {
+                    record.error = Some(format!("{error:#}"));
+                }
+            }
         }
     }
     Ok(counts)
@@ -220,6 +181,18 @@ fn queue_event_to_trigger(
     state: &mut State,
     event: &QueuedWebhookEvent,
 ) -> Result<Option<ReviewTrigger>> {
+    if event.event == "issue_comment" {
+        if let Some(comment) = event.comment_id {
+            let target = mention::Target {
+                repo: event.repo.clone(),
+                pr: event.pr_number,
+                comment,
+            };
+            mention::receive(config, &target, "webhook", false)?;
+            mention::import_mentions(state)?;
+        }
+        return Ok(None);
+    }
     if !is_repo_allowlisted(config, &event.repo) {
         return Ok(None);
     }
@@ -234,43 +207,7 @@ fn queue_event_to_trigger(
         author: None,
     });
 
-    if event.event == "issue_comment" {
-        let Some(comment_id) = event.comment_id else {
-            return Ok(None);
-        };
-        let comment = IssueComment {
-            id: comment_id,
-            body: event.comment_body.clone(),
-            user: event
-                .comment_author
-                .as_ref()
-                .map(|login| GhUser { login: login.clone() }),
-            html_url: event.comment_url.clone(),
-            created_at: None,
-        };
-        if !is_trigger_comment(config, &event.repo, &comment) {
-            return Ok(None);
-        }
-        let trigger = ReviewTrigger {
-            repo: event.repo.clone(),
-            pr,
-            kind: ReviewTriggerKind::MentionComment(comment),
-        };
-        let key = trigger.state_key();
-        match state
-            .processed_comments
-            .get(&key)
-            .map(|record| record.status.as_str())
-        {
-            None => {
-                acknowledge_trigger(config, &trigger);
-                enqueue_mention_trigger(state, &trigger)?;
-                Ok(Some(trigger))
-            },
-            Some(STATUS_PENDING) => Ok(Some(trigger)),
-            Some(_) => Ok(None),
-        }
-    } else if event.event == "pull_request" {
+    if event.event == "pull_request" {
         let now = now_epoch();
         mark_seen_open_pr(state, &event.repo, &pr, now);
         let key = pr_key(&event.repo, event.pr_number);
@@ -291,7 +228,11 @@ fn queue_event_to_trigger(
 }
 
 fn mark_queue_event_done(state: &mut State, event_id: &str, message: String) {
-    if let Some(event) = state.event_queue.iter_mut().find(|event| event.id == event_id) {
+    if let Some(event) = state
+        .event_queue
+        .iter_mut()
+        .find(|event| event.id == event_id)
+    {
         event.status = STATUS_COMMENTED.into();
         event.processed_at = Some(now_epoch());
         event.error = None;
@@ -299,19 +240,6 @@ fn mark_queue_event_done(state: &mut State, event_id: &str, message: String) {
             delivery.status = STATUS_COMMENTED.into();
             delivery.processed_at = Some(now_epoch());
             delivery.message = Some(message);
-        }
-    }
-}
-
-fn mark_queue_event_failed(state: &mut State, event_id: &str, error: String) {
-    if let Some(event) = state.event_queue.iter_mut().find(|event| event.id == event_id) {
-        event.status = STATUS_FAILED.into();
-        event.processed_at = Some(now_epoch());
-        event.error = Some(error.clone());
-        if let Some(delivery) = state.webhook_deliveries.get_mut(&event.delivery_id) {
-            delivery.status = STATUS_FAILED.into();
-            delivery.processed_at = Some(now_epoch());
-            delivery.message = Some(error);
         }
     }
 }
@@ -395,23 +323,7 @@ fn enqueue_auto_review_trigger(
 }
 
 fn is_trigger_comment(config: &Config, repo: &str, comment: &IssueComment) -> bool {
-    let Some(body) = comment.body.as_deref() else {
-        return false;
-    };
-    if body.contains(&config.comment_marker)
-        || body.contains("<!-- astrcode-review-summary:v2 -->")
-        || body.contains("<!-- astrcode-finding:v2:")
-        || body.contains(AGENT_LINE)
-        || body.contains("我是 whatevertogo 的自动化审查 agent。")
-    {
-        return false;
-    }
-    if !body.contains(&config.mention) {
-        return false;
-    }
-    let author = comment.user.as_ref().map(|user| user.login.as_str());
-    author.is_some_and(|author| is_trusted_comment_author(config, author))
-        || is_repo_allowlisted(config, repo)
+    mention::rejection(config, repo, comment).is_none()
 }
 
 fn is_trusted_comment_author(config: &Config, author: &str) -> bool {
@@ -454,8 +366,8 @@ async fn process_trigger(
             Ok(Some(url)) => {
                 update_auto_review_start_comment(state, &key, url);
                 save_state(state)?;
-            },
-            Ok(None) => {},
+            }
+            Ok(None) => {}
             Err(error) => eprintln!(
                 "failed to post auto review start comment for {}; continuing review: {error:#}",
                 key
@@ -469,14 +381,14 @@ async fn process_trigger(
             mark_trigger_commented(state, &key, &record);
             append_memory(config, &record)?;
             append_run_log(config, &record)?;
-        },
+        }
         Err(error) => {
             let error_text = error.to_string();
             mark_trigger_failed(state, &key, &trigger, error_text.clone());
             if config.auto_review_failure_comment {
                 match post_auto_review_failure_comment(config, &trigger, &error_text) {
                     Ok(Some(url)) => update_auto_review_failure_comment(state, &key, url),
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(comment_error) => eprintln!(
                         "failed to post auto review failure comment for {}: {comment_error:#}",
                         key
@@ -485,19 +397,13 @@ async fn process_trigger(
             }
             save_state(state)?;
             return Err(error);
-        },
+        }
     }
     save_state(state)?;
     Ok(())
 }
 
-fn enqueue_mention_trigger(state: &mut State, trigger: &ReviewTrigger) -> Result<()> {
-    if insert_pending_mention_trigger(state, trigger) {
-        save_state(state)?;
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn insert_pending_mention_trigger(state: &mut State, trigger: &ReviewTrigger) -> bool {
     let Some(comment) = trigger.comment() else {
         return false;
@@ -521,11 +427,12 @@ fn mark_trigger_running(state: &mut State, trigger: &ReviewTrigger) {
                 .processed_comments
                 .entry(key)
                 .or_insert_with(|| new_processed_comment(trigger, comment, STATUS_PENDING));
+            entry.head_sha = trigger.pr.head_ref_oid.clone();
             entry.status = STATUS_RUNNING.into();
             entry.started_at = now;
             entry.finished_at = None;
             entry.error = None;
-        },
+        }
         None => {
             let entry = state
                 .auto_pr_reviews
@@ -535,7 +442,7 @@ fn mark_trigger_running(state: &mut State, trigger: &ReviewTrigger) {
             entry.started_at = now;
             entry.finished_at = None;
             entry.error = None;
-        },
+        }
     }
 }
 
@@ -581,7 +488,7 @@ fn mark_seen_open_pr(state: &mut State, repo: &str, pr: &PullRequest, now: u64) 
             seen.head_sha = pr.head_ref_oid.clone();
             seen.last_seen_at = now;
             false
-        },
+        }
         None => {
             state.seen_open_prs.insert(
                 key,
@@ -594,7 +501,7 @@ fn mark_seen_open_pr(state: &mut State, repo: &str, pr: &PullRequest, now: u64) 
                 },
             );
             true
-        },
+        }
     }
 }
 
@@ -658,7 +565,7 @@ fn pending_trigger_order_key(state: &State, trigger: &ReviewTrigger) -> (u8, u64
                 .map(|record| record.started_at)
                 .unwrap_or(u64::MAX);
             (0, queued_at, comment.id)
-        },
+        }
         None => {
             let key = pr_key(&trigger.repo, trigger.pr.number);
             let queued_at = state
@@ -667,7 +574,7 @@ fn pending_trigger_order_key(state: &State, trigger: &ReviewTrigger) -> (u8, u64
                 .map(|record| record.started_at)
                 .unwrap_or(u64::MAX);
             (1, queued_at, trigger.pr.number)
-        },
+        }
     }
 }
 

@@ -12,7 +12,7 @@ pub fn spawn_webhook_server(config: Config) -> Result<()> {
                 config.webhook_secret_env
             );
             return Ok(());
-        },
+        }
     };
     let listener = TcpListener::bind(&config.webhook_listen_addr)
         .with_context(|| format!("bind webhook listener {}", config.webhook_listen_addr))?;
@@ -29,7 +29,7 @@ pub fn spawn_webhook_server(config: Config) -> Result<()> {
                             eprintln!("astrcode-pr-review-agent webhook request failed: {error:#}");
                         }
                     });
-                },
+                }
                 Err(error) => eprintln!("astrcode-pr-review-agent webhook accept failed: {error}"),
             }
         }
@@ -99,7 +99,11 @@ fn enqueue_webhook_request(
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
     if method != "POST" || path != config.webhook_path {
-        return Err(WebhookHttpError::new(404, "Not Found", "unknown webhook path"));
+        return Err(WebhookHttpError::new(
+            404,
+            "Not Found",
+            "unknown webhook path",
+        ));
     }
     let event = request
         .header("x-github-event")
@@ -111,7 +115,11 @@ fn enqueue_webhook_request(
         .header("x-hub-signature-256")
         .ok_or_else(|| WebhookHttpError::new(401, "Unauthorized", "missing signature"))?;
     if !verify_webhook_signature(secret, &request.body, signature) {
-        return Err(WebhookHttpError::new(401, "Unauthorized", "invalid signature"));
+        return Err(WebhookHttpError::new(
+            401,
+            "Unauthorized",
+            "invalid signature",
+        ));
     }
     let payload: Value = serde_json::from_slice(&request.body)
         .map_err(|error| WebhookHttpError::new(400, "Bad Request", format!("{error}")))?;
@@ -125,24 +133,28 @@ fn enqueue_webhook_payload(
     delivery_id: &str,
     payload: &Value,
 ) -> Result<String> {
-    ensure_layout(config)?;
-    let lock_path = agent_dir()?.join("run.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("open lock {}", lock_path.display()))?;
-    if lock.try_lock_exclusive().is_err() {
-        append_spooled_webhook_event(event, delivery_id, payload)?;
-        return Ok("queued in webhook spool".into());
+    mention::persist_webhook(event, delivery_id, payload)?;
+    if event == "issue_comment"
+        && matches!(payload["action"].as_str(), Some("created" | "edited"))
+        && !payload["issue"]["pull_request"].is_null()
+    {
+        let target = mention::Target {
+            repo: payload["repository"]["full_name"]
+                .as_str()
+                .context("missing repository")?
+                .into(),
+            pr: payload["issue"]["number"]
+                .as_u64()
+                .context("missing PR number")?,
+            comment: payload["comment"]["id"]
+                .as_u64()
+                .context("missing comment ID")?,
+        };
+        // Receipt happens independently of the executor lock. The webhook envelope remains
+        // durable as well if validation or the HTTP response fails.
+        return Ok(mention::receive(config, &target, "webhook", false)?.to_string());
     }
-    let mut state = load_state()?;
-    let message = enqueue_webhook_payload_into_state(config, &mut state, event, delivery_id, payload)?;
-    trim_webhook_state(&mut state);
-    save_state(&state)?;
-    lock.unlock()?;
-    Ok(message)
+    Ok("queued in durable webhook inbox".into())
 }
 
 fn enqueue_webhook_payload_into_state(
@@ -180,14 +192,14 @@ fn enqueue_webhook_payload_into_state(
     let queued = match event {
         "pull_request" if matches!(action.as_str(), "opened" | "reopened" | "synchronize") => {
             enqueue_pull_request_webhook(config, state, delivery_id, event, &action, payload)?
-        },
-        "issue_comment" if action == "created" => {
+        }
+        "issue_comment" if matches!(action.as_str(), "created" | "edited") => {
             enqueue_issue_comment_webhook(config, state, delivery_id, event, &action, payload)?
-        },
+        }
         "ping" => {
             mark_delivery_done(state, delivery_id, "ping accepted".into());
             false
-        },
+        }
         _ => {
             mark_delivery_done(
                 state,
@@ -195,7 +207,7 @@ fn enqueue_webhook_payload_into_state(
                 format!("ignored event={event} action={action}"),
             );
             false
-        },
+        }
     };
     Ok(if queued {
         "queued".into()
@@ -204,56 +216,8 @@ fn enqueue_webhook_payload_into_state(
     })
 }
 
-fn append_spooled_webhook_event(event: &str, delivery_id: &str, payload: &Value) -> Result<()> {
-    let path = webhook_spool_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    serde_json::to_writer(
-        &mut file,
-        &SpooledWebhookEvent {
-            event: event.to_owned(),
-            delivery_id: delivery_id.to_owned(),
-            payload: payload.clone(),
-            spooled_at: now_epoch(),
-        },
-    )?;
-    writeln!(file)?;
-    Ok(())
-}
-
 fn import_spooled_webhook_events(config: &Config, state: &mut State) -> Result<usize> {
-    let path = webhook_spool_path()?;
-    if !path.exists() {
-        return Ok(0);
-    }
-    let raw = fs::read_to_string(&path)?;
-    let backup = path.with_extension(format!("imported-{}.jsonl", now_epoch()));
-    fs::rename(&path, &backup)?;
-    let mut imported = 0usize;
-    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-        match serde_json::from_str::<SpooledWebhookEvent>(line) {
-            Ok(event) => {
-                if let Err(error) = enqueue_webhook_payload_into_state(
-                    config,
-                    state,
-                    &event.event,
-                    &event.delivery_id,
-                    &event.payload,
-                ) {
-                    eprintln!(
-                        "failed to import spooled webhook delivery {}: {error:#}",
-                        event.delivery_id
-                    );
-                } else {
-                    imported += 1;
-                }
-            },
-            Err(error) => eprintln!("failed to parse spooled webhook event: {error:#}"),
-        }
-    }
-    Ok(imported)
+    mention::import_webhooks(config, state)
 }
 
 fn enqueue_pull_request_webhook(
@@ -274,7 +238,11 @@ fn enqueue_pull_request_webhook(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !is_repo_allowlisted(config, repo) {
-        mark_delivery_done(state, delivery_id, format!("repo {repo} is not allowlisted"));
+        mark_delivery_done(
+            state,
+            delivery_id,
+            format!("repo {repo} is not allowlisted"),
+        );
         return Ok(false);
     }
     let Some(pr_number) = pr.get("number").and_then(Value::as_u64) else {
@@ -299,101 +267,29 @@ fn enqueue_issue_comment_webhook(
     config: &Config,
     state: &mut State,
     delivery_id: &str,
-    event: &str,
-    action: &str,
+    _event: &str,
+    _action: &str,
     payload: &Value,
 ) -> Result<bool> {
-    if payload
-        .get("issue")
-        .and_then(|issue| issue.get("pull_request"))
-        .is_none()
-    {
+    if payload["issue"]["pull_request"].is_null() {
         mark_delivery_done(state, delivery_id, "issue comment is not on a PR".into());
         return Ok(false);
     }
-    let repo = payload
-        .get("repository")
-        .and_then(|repo| repo.get("full_name"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !is_repo_allowlisted(config, repo) {
-        mark_delivery_done(state, delivery_id, format!("repo {repo} is not allowlisted"));
-        return Ok(false);
-    }
-    let Some(pr_number) = payload
-        .get("issue")
-        .and_then(|issue| issue.get("number"))
-        .and_then(Value::as_u64)
-    else {
-        mark_delivery_failed(state, delivery_id, "missing issue number".into());
-        return Ok(false);
+    let target = mention::Target {
+        repo: payload["repository"]["full_name"]
+            .as_str()
+            .context("missing repository")?
+            .into(),
+        pr: payload["issue"]["number"]
+            .as_u64()
+            .context("missing PR number")?,
+        comment: payload["comment"]["id"]
+            .as_u64()
+            .context("missing comment ID")?,
     };
-    let Some(comment) = payload.get("comment") else {
-        mark_delivery_failed(state, delivery_id, "missing comment".into());
-        return Ok(false);
-    };
-    let body = comment
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !body.contains(&config.mention) {
-        mark_delivery_done(state, delivery_id, "comment does not mention bot".into());
-        return Ok(false);
-    }
-    let pr = pr_details(repo, pr_number).unwrap_or_else(|_| PullRequest {
-        number: pr_number,
-        title: payload
-            .get("issue")
-            .and_then(|issue| issue.get("title"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        url: payload
-            .get("issue")
-            .and_then(|issue| issue.get("html_url"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        head_ref_oid: String::new(),
-        base_ref_name: String::new(),
-        body: payload
-            .get("issue")
-            .and_then(|issue| issue.get("body"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        files: Vec::new(),
-        author: None,
-    });
-    let event = QueuedWebhookEvent {
-        id: format!("{delivery_id}:issue_comment:{pr_number}"),
-        delivery_id: delivery_id.to_owned(),
-        event: event.to_owned(),
-        action: action.to_owned(),
-        repo: repo.to_owned(),
-        pr_number,
-        head_sha: pr.head_ref_oid,
-        base_ref_name: pr.base_ref_name,
-        pr_title: pr.title,
-        pr_url: pr.url,
-        pr_body: pr.body,
-        comment_id: comment.get("id").and_then(Value::as_u64),
-        comment_body: Some(body.to_owned()),
-        comment_author: comment
-            .get("user")
-            .and_then(|user| user.get("login"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        comment_url: comment
-            .get("html_url")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        status: STATUS_PENDING.into(),
-        queued_at: now_epoch(),
-        processed_at: None,
-        error: None,
-    };
-    push_webhook_event(state, event);
-    Ok(true)
+    let receipt = mention::receive(config, &target, "webhook", false)?;
+    mark_delivery_done(state, delivery_id, receipt.to_string());
+    Ok(false)
 }
 
 fn queued_webhook_event_from_pr(
@@ -433,7 +329,10 @@ fn queued_webhook_event_from_pr(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        pr_body: pr.get("body").and_then(Value::as_str).map(ToOwned::to_owned),
+        pr_body: pr
+            .get("body")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         comment_id: None,
         comment_body: None,
         comment_author: None,
@@ -477,19 +376,6 @@ fn mark_delivery_failed(state: &mut State, delivery_id: &str, message: String) {
         delivery.status = STATUS_FAILED.into();
         delivery.processed_at = Some(now_epoch());
         delivery.message = Some(message);
-    }
-}
-
-fn trim_webhook_state(state: &mut State) {
-    if state.event_queue.len() > 500 {
-        let keep_from = state.event_queue.len().saturating_sub(500);
-        state.event_queue.drain(0..keep_from);
-    }
-    while state.webhook_deliveries.len() > 500 {
-        let Some(key) = state.webhook_deliveries.keys().next().cloned() else {
-            break;
-        };
-        state.webhook_deliveries.remove(&key);
     }
 }
 
