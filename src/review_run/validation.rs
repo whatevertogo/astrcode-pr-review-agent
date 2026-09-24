@@ -40,6 +40,8 @@ pub(super) fn validate(
         )
     });
     let mut review = ValidatedReview {
+        global_review_complete: output.global_review_complete,
+        candidate_checks: output.candidate_checks.clone(),
         inline_findings: Vec::new(),
         summary_findings: Vec::new(),
         unplaced_findings: Vec::new(),

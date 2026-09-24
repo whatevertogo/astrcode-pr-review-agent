@@ -1,17 +1,20 @@
 struct StagedReviewRun {
     path: PathBuf,
-    outputs: BTreeMap<String, ReviewBotOutput>,
+    outputs: BTreeMap<(String, String), ReviewBotOutput>,
+    identity: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StagedReviewRecord {
     label: String,
     created_at: u64,
+    #[serde(default)]
+    input_key: String,
     output: ReviewBotOutput,
 }
 
 impl StagedReviewRun {
-    fn load(trigger: &ReviewTrigger) -> Result<Self> {
+    fn load(trigger: &ReviewTrigger, identity: String) -> Result<Self> {
         let path = staged_review_path(trigger)?;
         let mut outputs = BTreeMap::new();
         if path.exists() {
@@ -24,7 +27,9 @@ impl StagedReviewRun {
                 }
                 match serde_json::from_str::<StagedReviewRecord>(line) {
                     Ok(record) => {
-                        outputs.insert(record.label, record.output);
+                        if !record.input_key.is_empty() {
+                            outputs.insert((record.label, record.input_key), record.output);
+                        }
                     },
                     Err(error) => eprintln!(
                         "failed to parse staged review output {} line {}: {error:#}",
@@ -34,15 +39,14 @@ impl StagedReviewRun {
                 }
             }
         }
-        Ok(Self { path, outputs })
+        Ok(Self { path, outputs, identity })
     }
 
-    fn output(&self, label: &str) -> Option<ReviewBotOutput> {
-        self.outputs.get(label).cloned()
+    fn output(&self, label: &str, prompt: &str) -> Option<ReviewBotOutput> {
+        self.outputs.get(&(label.to_owned(), self.input_key(prompt))).cloned()
     }
 
-    fn append(&mut self, label: &str, output: &ReviewBotOutput) -> Result<()> {
-        self.outputs.insert(label.to_owned(), output.clone());
+    fn append(&mut self, label: &str, prompt: &str, output: &ReviewBotOutput) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create staged review dir {}", parent.display()))?;
@@ -55,12 +59,20 @@ impl StagedReviewRun {
         let record = StagedReviewRecord {
             label: label.to_owned(),
             created_at: now_epoch(),
+            input_key: self.input_key(prompt),
             output: output.clone(),
         };
         let line = serde_json::to_string(&record)?;
         writeln!(file, "{line}")
             .with_context(|| format!("write staged review output {}", self.path.display()))?;
+        file.sync_data()?;
+        self.outputs.insert((label.to_owned(), record.input_key), output.clone());
         Ok(())
+    }
+
+    fn input_key(&self, prompt: &str) -> String {
+        use sha2::Digest;
+        format!("{:x}", Sha256::digest(format!("{}\n{prompt}", self.identity)))
     }
 }
 

@@ -528,7 +528,7 @@ enum ReviewFileKind {
 impl ReviewFileKind {
     fn coverage_status(self) -> CoverageStatus {
         match self {
-            Self::Code | Self::Docs => CoverageStatus::Reviewed,
+            Self::Code | Self::Docs => CoverageStatus::Pending,
             Self::Generated => CoverageStatus::SkippedGenerated,
             Self::NoPatch => CoverageStatus::NoPatch,
             Self::Oversized => CoverageStatus::OversizedPartial,
@@ -555,6 +555,7 @@ struct ReviewShard {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum CoverageStatus {
+    Pending,
     Reviewed,
     NoPatch,
     SkippedGenerated,
@@ -565,6 +566,7 @@ enum CoverageStatus {
 impl CoverageStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Reviewed => "reviewed",
             Self::NoPatch => "no_patch",
             Self::SkippedGenerated => "skipped_generated",
@@ -675,6 +677,10 @@ impl CommentSide {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ReviewBotOutput {
+    #[serde(default)]
+    global_review_complete: bool,
+    #[serde(default)]
+    candidate_checks: Vec<review_global::CandidateCheck>,
     #[serde(default)]
     confirmed_findings: Vec<ReviewFinding>,
     #[serde(default)]
@@ -806,6 +812,10 @@ struct UnplacedFinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ValidatedReview {
+    #[serde(default)]
+    global_review_complete: bool,
+    #[serde(default)]
+    candidate_checks: Vec<review_global::CandidateCheck>,
     inline_findings: Vec<ValidatedFinding>,
     summary_findings: Vec<ValidatedFinding>,
     unplaced_findings: Vec<UnplacedFinding>,

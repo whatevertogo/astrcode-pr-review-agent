@@ -408,6 +408,7 @@ async fn run_coverage_first_review(
         return Ok(validated);
     }
 
+    let (run_orientation, max_file_passes) = review_global::file_budget(config.max_review_passes_per_pr)?;
     let shards = plan_review_shards(config, context);
     let mut coverage = initial_coverage(context);
     let mut outputs = Vec::new();
@@ -424,7 +425,10 @@ async fn run_coverage_first_review(
         "deterministic-checks.json",
         &serde_json::to_string_pretty(&deterministic_checks).unwrap_or_default(),
     );
-    let mut staging = match StagedReviewRun::load(trigger) {
+    let base_sha = run_command("git", &["merge-base", "HEAD", &trigger.pr.base_ref_name], Some(worktree))?;
+    let identity = json!({"version":2,"head":trigger.pr.head_ref_oid,"base":base_sha.trim(),
+        "config":config,"model":review_run::model_identity(run_info)?,"context":context.text}).to_string();
+    let mut staging = match StagedReviewRun::load(trigger, identity) {
         Ok(run) => {
             write_debug_artifact(
                 debug_dir.as_deref(),
@@ -441,11 +445,7 @@ async fn run_coverage_first_review(
             None
         },
     };
-    let max_passes = config.max_review_passes_per_pr.max(1);
-    let reserved_passes = 2usize.min(max_passes.saturating_sub(1));
-    let max_file_passes = max_passes.saturating_sub(reserved_passes).max(1);
-
-    if max_passes > 1 {
+    if run_orientation {
         let prompt = orientation_review_prompt(
             config,
             trigger,
@@ -462,6 +462,7 @@ async fn run_coverage_first_review(
             debug_dir.as_deref(),
             staging.as_mut(),
             "orientation",
+            None,
         )
         .await
         {
@@ -494,6 +495,7 @@ async fn run_coverage_first_review(
             debug_dir.as_deref(),
             staging.as_mut(),
             &label,
+            None,
         )
         .await
         {
@@ -564,7 +566,8 @@ async fn run_coverage_first_review(
         }
     }
 
-    if outputs.len() + 1 < max_passes {
+    let candidates = review_global::candidates(&merge_review_outputs(&outputs));
+    let mut merged = {
         let prompt_context = PassPromptContext {
             config,
             trigger,
@@ -582,19 +585,19 @@ async fn run_coverage_first_review(
             debug_dir.as_deref(),
             staging.as_mut(),
             "global-pass",
+            Some(&candidates),
         )
         .await
         {
-            Ok(output) => outputs.push(output),
+            Ok(output) => output,
             Err(error) => {
                 anyhow::bail!(
                     "global review pass failed; review did not complete: {error:#}"
                 );
             },
         }
-    }
+    };
 
-    let mut merged = merge_review_outputs(&outputs);
     merged.verification.extend(deterministic_checks);
     write_debug_artifact(
         debug_dir.as_deref(),
@@ -616,6 +619,7 @@ async fn run_coverage_first_review(
     Ok(validated)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn submit_review_pass(
     config: &Config,
     run_info: &RunInfo,
@@ -624,9 +628,12 @@ async fn submit_review_pass(
     debug_dir: Option<&Path>,
     mut staging: Option<&mut StagedReviewRun>,
     label: &str,
+    candidates: Option<&[Value]>,
 ) -> Result<ReviewBotOutput> {
     if let Some(staging) = staging.as_deref_mut() {
-        if let Some(output) = staging.output(label) {
+        if let Some(output) = staging.output(label, prompt).filter(|output| {
+            candidates.is_none_or(|items| review_global::validate(output, items).is_ok())
+        }) {
             write_debug_artifact(
                 debug_dir,
                 &format!("{label}-response.json"),
@@ -644,14 +651,14 @@ async fn submit_review_pass(
     )
     .await?;
     write_debug_artifact(debug_dir, &format!("{label}-response.txt"), &review);
-    let output = parse_or_repair_review_output(config, run_info, session_id, &review).await?;
+    let output = parse_or_repair_checked_output(config, run_info, session_id, &review, candidates).await?;
     write_debug_artifact(
         debug_dir,
         &format!("{label}-response.json"),
         &serde_json::to_string_pretty(&output).unwrap_or_default(),
     );
     if let Some(staging) = staging {
-        staging.append(label, &output)?;
+        staging.append(label, prompt, &output)?;
     }
     Ok(output)
 }
@@ -695,6 +702,10 @@ fn write_debug_artifact(debug_dir: Option<&Path>, name: &str, content: &str) {
 
 fn validated_review_debug_json(validated: &ValidatedReview) -> Value {
     json!({
+        "global_review_complete": validated.global_review_complete,
+        "candidate_checks": validated.candidate_checks,
+        "coverage": validated.coverage,
+        "verification": validated.verification,
         "inline_findings": validated.inline_findings.iter().map(validated_finding_json).collect::<Vec<_>>(),
         "summary_findings": validated.summary_findings.iter().map(validated_finding_json).collect::<Vec<_>>(),
         "unplaced_findings": validated.unplaced_findings.iter().map(|finding| json!({
@@ -1052,7 +1063,7 @@ fn global_review_prompt(
 - 工作树：`{worktree}`
 - Head SHA：`{sha}`
 - 查找跨文件的 Correctness、Security、Reliability/Performance 和 Tests/API Contract 问题。
-- 不要重复文件审查阶段已经发现的问题。
+- 返回复核后的完整最终集合；前片旧发现不会自动追加。
 - 不要发布 GitHub 评论。
 - 可执行问题放进 `<finding>` 标签；不要创建 `verification` 项或“通过”的审查备注。
 - 严重程度与置信程度分别判断；缺测试或设计顾虑不能直接当作已确认缺陷。
@@ -1074,9 +1085,16 @@ fn global_review_prompt(
 {coverage}
 ```
 
-文件审查阶段输出：
+文件审查阶段输出（保留事实供交叉核对）：
 ```json
 {outputs}
+```
+
+{contract}
+
+必须逐条处置的候选：
+```json
+{candidates}
 ```
 
 既有记忆：
@@ -1093,6 +1111,8 @@ fn global_review_prompt(
         repo = prompt.trigger.repo,
         pr_number = prompt.trigger.pr.number,
         instructions = GLOBAL_REVIEW_PROMPT.trim(),
+        contract = review_global::CONTRACT,
+        candidates = serde_json::to_string_pretty(&review_global::candidates(&merge_review_outputs(outputs))).unwrap_or_default(),
         protocol = PR_REVIEW_BOT_PROMPT.trim(),
         few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         repo_instructions = instruction_context_for_paths(
@@ -2313,17 +2333,40 @@ async fn parse_or_repair_review_output(
     session_id: &str,
     initial: &str,
 ) -> Result<ReviewBotOutput> {
+    parse_or_repair_checked_output(config, run_info, session_id, initial, None).await
+}
+
+async fn parse_or_repair_checked_output(
+    config: &Config,
+    run_info: &RunInfo,
+    session_id: &str,
+    initial: &str,
+    candidates: Option<&[Value]>,
+) -> Result<ReviewBotOutput> {
     let mut latest = initial.to_owned();
+    let original = candidates.and_then(|_| parse_review_bot_output(initial).ok());
     let mut last_error = None;
-    for attempt in 0..=config.json_repair_attempts {
-        match parse_review_bot_output(&latest) {
+    let repairs = config.json_repair_attempts.min(1);
+    for attempt in 0..=repairs {
+        match parse_review_bot_output(&latest).and_then(|mut output| {
+            if attempt > 0 {
+                if let Some(original) = &original {
+                    output = review_global::repair_receipt(original, output);
+                }
+            }
+            if let Some(candidates) = candidates { review_global::validate(&output, candidates)?; }
+            Ok(output)
+        }) {
             Ok(output) => return Ok(output),
             Err(error) => {
                 last_error = Some(error);
-                if attempt == config.json_repair_attempts {
+                if attempt == repairs {
                     break;
                 }
-                let prompt = json_repair_prompt(&latest, last_error.as_ref().unwrap());
+                let mut prompt = json_repair_prompt(&latest, last_error.as_ref().unwrap());
+                if let Some(candidates) = candidates {
+                    prompt.push_str(&format!("\n{}\n候选：{}\n只修复 global_review_complete 与 candidate_checks。原始 findings、observations、investigation_log 等正文由程序原样保留；索引必须指向原始正文，不得新增、删除、重排或改写发现来凑齐回执。无法根据现有事实处置的候选不要捏造结论。", review_global::CONTRACT, serde_json::to_string(candidates)?));
+                }
                 latest = submit_prompt_and_wait(
                     run_info,
                     session_id,
@@ -2392,6 +2435,18 @@ struct TaggedBlock {
 fn parse_tagged_review_output(text: &str) -> Result<ReviewBotOutput> {
     let mut output = ReviewBotOutput::default();
     let mut recognized = false;
+    output.global_review_complete = extract_tag_blocks(text, "global_review_complete")
+        .iter().any(|block| block.body.trim() == "true");
+    recognized |= output.global_review_complete;
+    for block in extract_tag_blocks(text, "candidate_check") {
+        recognized = true;
+        output.candidate_checks.push(review_global::CandidateCheck {
+            id: block.attrs.get("id").cloned().unwrap_or_default(),
+            outcome: block.attrs.get("outcome").cloned().unwrap_or_default(),
+            result_index: block.attrs.get("result_index").map(|s| s.parse()).transpose().context("invalid candidate result_index")?,
+            reason: block.body.trim().to_owned(),
+        });
+    }
 
     let files_reviewed = extract_tag_blocks(text, "files_reviewed")
         .into_iter()
@@ -3055,6 +3110,7 @@ fn final_comment_report_prompt(
 
 规则：
 - 只返回严格 JSON：{{"report":"...markdown..."}}，不调用工具或重新调查。
+- 覆盖范围以插件提供的文件级状态为准：定向或全局抽查不能补成完整审查，pending/failed/no_patch/oversized_partial 均不可计入已审。不得仅根据清单大小宣称全部文件审查完成。
 - 首段直接给出与已审范围相符的结论；未审、失败或未执行验证时说明限制。没有问题时写“在已审范围内未发现需要修复的问题”，不批准合并。
 - 已有行评只列优先级、简短问题和位置，避免复制整条行评。待核实建议与确定问题分开；不能把“没发出行评”等同于“没有问题”。
 - 仅总结的问题保留触发条件、影响、依据与最小修复方向。未确认的前提必须明确标注，不提高置信度，不虚构命令、代码事实或验证结果。
@@ -3206,11 +3262,17 @@ fn final_review_comment_body(
     };
     let sha = &trigger.pr.head_ref_oid;
     let mut body = format!(
-        "{}\n{AGENT_LINE}\n\n**{status}** · 审查版本 `{}`\n\n{}\n",
+        "{}\n{AGENT_LINE}\n\n**{status}** · 审查版本 `{}`\n\n",
         config.comment_marker,
         &sha[..sha.len().min(12)],
-        report.trim()
     );
+    body.push_str(&review_global::summary(validated));
+    if let Some(coverage) = &validated.coverage {
+        let skipped = coverage.entries.values().filter(|e| e.status == CoverageStatus::SkippedGenerated).count();
+        body.push_str(&format!("\n文件阶段覆盖：{}/{}；生成文件跳过 {}。全局复核不会将未审文件计为已审。\n", coverage.reviewed_count(), coverage.total_count(), skipped));
+        review_comments::fold(&mut body, "程序记录的文件覆盖", &coverage.summary_lines());
+    }
+    body.push_str(&format!("\n{}\n", report.trim()));
     if let Some(url) = &published.inline_review_url {
         body.push_str(&format!(
             "\n[查看 {} 条行评]({url})\n",
@@ -3303,6 +3365,7 @@ fn publish_structured_review(
     session_id: &str,
     validated: &ValidatedReview,
 ) -> Result<PublishedReview> {
+    anyhow::ensure!(validated.global_review_complete, "mandatory global review has not completed; refusing to publish review");
     let mut fallback_unplaced = validated.unplaced_findings.clone();
     let mut inline_findings = validated.inline_findings.clone();
     apply_severity_gate(config, trigger, &mut inline_findings, &mut fallback_unplaced);
@@ -3327,6 +3390,8 @@ fn publish_structured_review(
     let inline_findings = publish.inline_findings;
 
     let summary_validated = ValidatedReview {
+        global_review_complete: validated.global_review_complete,
+        candidate_checks: validated.candidate_checks.clone(),
         inline_findings: inline_findings.clone(),
         summary_findings: validated.summary_findings.clone(),
         unplaced_findings: fallback_unplaced.clone(),
