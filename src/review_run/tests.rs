@@ -174,17 +174,17 @@ fn global_review_receives_complete_notes_for_reconciliation() {
         ..ReviewBotOutput::default()
     };
     let payload = context::adjudication_context(&output, &[]);
-    assert_eq!(payload["observations"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["residual_risk"].as_array().unwrap().len(), 1);
+    let candidates = review_global::candidates(&output);
+    assert_eq!(candidates.len(), 3);
     assert_eq!(
-        payload["observations"][0]["impact"],
+        candidates[1]["content"]["impact"],
         json!(output.observations[0].impact)
     );
     assert_eq!(
-        payload["observations"][0]["evidence"],
+        candidates[1]["content"]["evidence"],
         json!(output.observations[0].evidence)
     );
-    assert_eq!(payload["residual_risk"].as_array().unwrap().len(), 1);
-    assert_eq!(payload["confirmed_findings"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -259,6 +259,7 @@ pub(super) fn finding(
     confidence: &str,
 ) -> ReviewFinding {
     ReviewFinding {
+        non_blocking: false,
         severity: Some(priority.into()),
         confidence: Some(confidence.into()),
         category: Some("Correctness".into()),
@@ -310,7 +311,7 @@ fn strict_locations_filter_before_limit_and_preserve_non_inline_evidence() {
         .as_deref()
         .unwrap()
         .starts_with("[P1]"));
-    assert!(report::conclusion(&result).contains("已确认 3"));
+    assert!(report::conclusion(&result).contains("已确认 4"));
     assert!(result.observations[0]
         .evidence
         .as_deref()
@@ -339,7 +340,7 @@ fn strict_locations_filter_before_limit_and_preserve_non_inline_evidence() {
     );
     assert!(zero.inline_findings.is_empty());
     assert_eq!(zero.summary_findings.len(), 6);
-    assert!(report::conclusion(&zero).contains("已确认 3"));
+    assert!(report::conclusion(&zero).contains("已确认 4"));
 }
 
 #[test]
@@ -461,6 +462,37 @@ fn artifacts_round_trip_atomically_and_cache_key_covers_every_input() {
     let config = Config::default();
     let model = json!({"model":"same"});
     let key = input_key(&snapshot, &config, &model).unwrap();
+    let legacy_json = json!({"schema_version":3,"input_key":"v1-key-with-old-prompts",
+        "repo":snapshot.repo,"pr_number":snapshot.pr.number,"base_sha":snapshot.base_sha,"head_sha":snapshot.pr.head_ref_oid,
+        "model":model,"pipeline":"quality_first","status":"complete",
+        "review":{"inline_findings":[],"summary_findings":[],"unplaced_findings":[],"observations":[],
+            "investigation_log":[],"verification":[],"residual_risk":[],"summary":null,"coverage":null,"debug_dir":null},
+        "stages":[{"label":"global","input_key":"legacy-stage","session_id":"old-session","started_at":0,
+            "elapsed_seconds":1,"status":"complete","error":null,"usage":usage::Usage::default(),
+            "output":{"confirmed_findings":[finding("global-only discovery","RIGHT",2,"P2","high")]}}]});
+    for (field, value) in [
+        ("input_key", json!(key)),
+        ("base_sha", json!("changed")),
+        ("head_sha", json!("changed")),
+        ("repo", json!("other/repo")),
+        ("pr_number", json!(2)),
+        ("model", json!({"model":"changed"})),
+    ] {
+        let mut raw = legacy_json.clone();
+        raw[field] = value;
+        let previous: ReviewRunResult = serde_json::from_value(raw).unwrap();
+        let carried = pipeline::migration_candidates(&previous, &snapshot, &model);
+        assert_eq!(carried.is_some(), field == "input_key");
+    }
+    let previous: ReviewRunResult = serde_json::from_value(legacy_json).unwrap();
+    assert_eq!(
+        pipeline::migration_candidates(&previous, &snapshot, &model)
+            .unwrap()
+            .confirmed_findings
+            .len(),
+        1
+    );
+
     let mut changed = snapshot.clone();
     changed.base_sha.push('x');
     assert_ne!(key, input_key(&changed, &config, &model).unwrap());

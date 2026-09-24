@@ -1,6 +1,5 @@
 pub const AGENT_LINE: &str = "我是 whatevertogo 的替身。";
 pub const DEFAULT_MARKER: &str = "<!-- astrcode-auto-review -->";
-const COMMENT_STYLE_PROMPT: &str = include_str!("../prompts/comment-style.md");
 const PR_REVIEW_BOT_PROMPT: &str = concat!(
     include_str!("../prompts/pr-review-bot.md"),
     "\n",
@@ -701,6 +700,9 @@ struct ReviewBotOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ReviewFinding {
+    /// Explicit optional improvement; absent on legacy uncertain advisories.
+    #[serde(default)]
+    non_blocking: bool,
     #[serde(default)]
     severity: Option<String>,
     #[serde(default)]
@@ -765,12 +767,6 @@ impl FindingKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct FinalCommentOutput {
-    #[serde(default)]
-    report: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct VerificationItem {
     #[serde(default)]
     command: Option<String>,
@@ -784,6 +780,8 @@ struct VerificationItem {
 struct ValidatedFinding {
     priority: String,
     kind: FindingKind,
+    #[serde(default)]
+    non_blocking: bool,
     confidence: String,
     category: String,
     path: String,

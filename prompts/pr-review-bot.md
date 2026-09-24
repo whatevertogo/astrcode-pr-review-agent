@@ -37,6 +37,6 @@ Next step: 能确认或推翻它的具体检查。
 </summary>
 ```
 
-kind 为 confirmed 或 advisory；confidence 为 high、medium 或 low；category 从四个审查角度中选择。不能精确定位的有证据问题保留原位置与限制，由插件决定展示位置，不挪到附近行。观察不必填满字段，没有有用信息就不输出。
+kind 为 confirmed 或 advisory；confidence 为 high、medium 或 low；category 使用专家视角表中的对应分类。非阻塞改进使用 kind="advisory" non_blocking="true" priority="P3" confidence="high"；缺少 non_blocking 时默认 false，仍表示待确认。不能精确定位的有证据问题保留原位置与限制，由插件决定展示位置，不挪到附近行。观察不必填满字段，没有有用信息就不输出。
 files_reviewed 仅填实际完整审过本分片全部变更的路径，不附行号或括注。未审完整的范围说明原因，不能只因文件出现在清单里就标记已审。
 不生成 verification；检查回执由插件提供。无发现时不输出 finding 或 observation 标签；不要生成“无标题”、空正文或占位问题。仍输出 files_reviewed 与 summary，说明已审范围，不据此批准合并。兼容的旧 JSON 输出仍可解析。

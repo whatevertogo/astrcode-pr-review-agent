@@ -140,9 +140,16 @@ review receipt to the GitHub overview.
 
 Inline comments show the issue, impact, evidence and suggested action directly;
 only supplementary context is folded. Unconfirmed advice is visibly marked.
-The final-report prompt avoids mandatory merge verdicts and repeated sections.
-The fallback report preserves saved evidence and missing-validation warnings;
-publication receipts identify which findings actually became inline comments.
+Both pipelines render the final overview from saved structured findings and
+program receipts, with no final model call. This keeps file counts, publication
+counts and validation status consistent. Findings and useful optional suggestions
+appear in the visible index; full evidence and execution details can be expanded.
+Explicit `non_blocking` advisories are labeled optional and kept at P3; legacy
+advisories without that field remain uncertain. Publication thresholds are unchanged.
+
+[Prompt design and references](prompts/README.md) describe six change-aware expert
+perspectives, evidence requirements and collegial comment style. These are lenses
+within the existing review stages, not six additional model calls.
 Session/trigger metadata is available in a fold below the result.
 
 Re-render a saved result without running a model or contacting GitHub:
@@ -336,3 +343,19 @@ cargo check
 ```
 
 The crate depends on `astrcode-extension-sdk` from the Astrcodey repository.
+
+Global review payloads up to 24 KB are embedded once. Larger payloads are saved
+in an immutable file named by their SHA-256 digest, and the model receives its
+path and candidate count for chunked reads; every candidate still requires a
+disposition. Receipts must contain positive `path:line` source locations, which
+validates their structure but does not prove the model's semantic conclusions.
+Coverage-first cache identity uses the refreshed remote base commit. Prior
+schema results at the same repository, PR, base/head and model may contribute
+candidate hints for a fresh review under current rules, never cached completion
+or coverage across a schema/prompt change.
+
+Oversized GitHub overviews retain the complete report in the run directory and
+publish a bounded index of whole findings instead. Evidence/code blocks are
+never cut in half; omitted entries are disclosed, and the saved report preserves
+the original evidence, checks and residual risks. Root-level extensionless files
+use the same positive `path:line` receipt syntax as all other source paths.

@@ -112,13 +112,12 @@ async fn review_trigger(
         let mut published = publish_structured_review(config, &trigger, &session_id, &validated)?;
         post_final_structured_report(
             config,
-            run_info,
             &trigger,
             &session_id,
             &validated,
             &mut published,
         )
-        .await?;
+        ?;
         update_pr_review_memory(state, &trigger, &session_id, Some(&validated), &published);
         published
     } else {
@@ -425,7 +424,7 @@ async fn run_coverage_first_review(
         "deterministic-checks.json",
         &serde_json::to_string_pretty(&deterministic_checks).unwrap_or_default(),
     );
-    let base_sha = run_command("git", &["merge-base", "HEAD", &trigger.pr.base_ref_name], Some(worktree))?;
+    let base_sha = run_command("git", &["rev-parse", &format!("refs/remotes/origin/{}", trigger.pr.base_ref_name)], Some(worktree))?;
     let identity = json!({"version":2,"head":trigger.pr.head_ref_oid,"base":base_sha.trim(),
         "config":config,"model":review_run::model_identity(run_info)?,"context":context.text}).to_string();
     let mut staging = match StagedReviewRun::load(trigger, identity) {
@@ -576,7 +575,7 @@ async fn run_coverage_first_review(
             context,
             deterministic_checks: &deterministic_checks,
         };
-        let prompt = global_review_prompt(&prompt_context, &coverage, &outputs);
+        let prompt = global_review_prompt(&prompt_context, &coverage, &outputs)?;
         match submit_review_pass(
             config,
             run_info,
@@ -1038,8 +1037,11 @@ fn global_review_prompt(
     prompt: &PassPromptContext<'_>,
     coverage: &ReviewCoverage,
     outputs: &[ReviewBotOutput],
-) -> String {
-    format!(
+) -> Result<String> {
+    let candidates = review_global::candidates(&merge_review_outputs(outputs));
+    let notes = outputs.iter().map(|output| json!({"facts":output.investigation_log,"risks":output.residual_risk})).collect::<Vec<_>>();
+    let payload = review_global::prompt_context(&candidates, &json!(notes), &agent_dir()?.join("global-context"))?;
+    Ok(format!(
         r#"{AGENT_LINE}
 
 你正在执行 {repo} PR #{pr_number} 的全局风险审查阶段。所有自然语言输出必须使用简体中文。
@@ -1085,11 +1087,6 @@ fn global_review_prompt(
 {coverage}
 ```
 
-文件审查阶段输出（保留事实供交叉核对）：
-```json
-{outputs}
-```
-
 {contract}
 
 必须逐条处置的候选：
@@ -1112,7 +1109,7 @@ fn global_review_prompt(
         pr_number = prompt.trigger.pr.number,
         instructions = GLOBAL_REVIEW_PROMPT.trim(),
         contract = review_global::CONTRACT,
-        candidates = serde_json::to_string_pretty(&review_global::candidates(&merge_review_outputs(outputs))).unwrap_or_default(),
+        candidates = payload,
         protocol = PR_REVIEW_BOT_PROMPT.trim(),
         few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         repo_instructions = instruction_context_for_paths(
@@ -1130,14 +1127,13 @@ fn global_review_prompt(
         worktree = prompt.worktree.display(),
         sha = prompt.trigger.pr.head_ref_oid,
         coverage = coverage.summary_lines(),
-        outputs = serde_json::to_string_pretty(outputs).unwrap_or_else(|_| "[]".into()),
         memory = if prompt.memory.trim().is_empty() {
             "这个 PR 暂无既有记忆。"
         } else {
             prompt.memory
         },
         context = short_context_for_global_pass(prompt.context),
-    )
+    ))
 }
 
 fn short_context_for_global_pass(context: &ReviewContext) -> String {
@@ -2514,6 +2510,7 @@ fn parse_tagged_review_output(text: &str) -> Result<ReviewBotOutput> {
 fn tagged_finding(block: &TaggedBlock) -> ReviewFinding {
     let sections = tagged_body_sections(&block.body);
     ReviewFinding {
+        non_blocking: tagged_value(block, &sections, &["non_blocking"]).as_deref() == Some("true"),
         severity: tagged_value(block, &sections, &["priority", "severity"]),
         confidence: tagged_value(block, &sections, &["confidence"]),
         category: tagged_value(block, &sections, &["category"]),
@@ -2862,6 +2859,7 @@ fn json_repair_prompt(previous: &str, error: &anyhow::Error) -> String {
         r#"{AGENT_LINE}
 
 Your previous response could not be parsed as the required PR review JSON.
+Preserve all findings, evidence, classification and non_blocking flags; repair syntax only. Do not add, remove or reclassify conclusions.
 
 Parse error:
 ```text
@@ -2906,22 +2904,26 @@ Previous response:
     )
 }
 
-async fn post_final_structured_report(
+fn post_final_structured_report(
     config: &Config,
-    run_info: &RunInfo,
     trigger: &ReviewTrigger,
     session_id: &str,
     validated: &ValidatedReview,
     published: &mut PublishedReview,
 ) -> Result<()> {
-    let report =
-        match final_comment_report_pass(config, run_info, session_id, trigger, validated, published)
-            .await
-        {
-            Ok(report) => report,
-            Err(error) => fallback_final_report(validated, published, Some(&format!("{error:#}"))),
+    let full = final_review_comment_body(config, trigger, session_id, validated, published);
+    let body = if full.len() > 60_000 {
+        let directory = match &validated.debug_dir {
+            Some(directory) => directory.clone(),
+            None => create_debug_run_dir(config, trigger)?,
         };
-    let body = final_review_comment_body(config, trigger, session_id, validated, published, &report);
+        let header = final_review_header(config, trigger, validated);
+        let content = review_comments::publication_content(&full, validated,
+            published.inline_review_url.as_deref(), &directory.join("full-final-report.md"),
+            60_000usize.saturating_sub(header.len()))?;
+        format!("{header}{content}")
+    } else { full };
+    anyhow::ensure!(body.len() <= 60_000, "review summary exceeds GitHub budget");
     write_debug_artifact(
         validated.debug_dir.as_deref(),
         "final-comment-body.md",
@@ -2933,375 +2935,54 @@ async fn post_final_structured_report(
     Ok(())
 }
 
-async fn final_comment_report_pass(
-    config: &Config,
-    run_info: &RunInfo,
-    session_id: &str,
-    trigger: &ReviewTrigger,
-    validated: &ValidatedReview,
-    published: &PublishedReview,
-) -> Result<String> {
-    let prompt = final_comment_report_prompt(trigger, validated, published);
-    write_debug_artifact(
-        validated.debug_dir.as_deref(),
-        "final-report-prompt.md",
-        &prompt,
-    );
-    let response = submit_prompt_and_wait(
-        run_info,
-        session_id,
-        &prompt,
-        Duration::from_secs(config.review_timeout_seconds),
-    )
-    .await?;
-    write_debug_artifact(
-        validated.debug_dir.as_deref(),
-        "final-report-response.txt",
-        &response,
-    );
-    let candidate = extract_json_object(&response).context("final report response missing JSON")?;
-    let parsed: FinalCommentOutput =
-        serde_json::from_str(candidate).context("parse final report JSON")?;
-    let report = sanitize_final_report(&parsed.report);
-    if report.is_empty() {
-        anyhow::bail!("final report was empty");
-    }
-    Ok(report)
-}
-
-fn final_comment_report_prompt(
-    trigger: &ReviewTrigger,
-    validated: &ValidatedReview,
-    published: &PublishedReview,
-) -> String {
-    let (posted, unposted): (Vec<_>, Vec<_>) =
-        validated.inline_findings.iter().partition(|finding| {
-            published
-                .posted_findings
-                .iter()
-                .any(|receipt| receipt.fingerprint == finding_fingerprint(finding))
-        });
-    let summary_only_count = validated.summary_findings.len() + unposted.len();
-    let inline = posted.into_iter()
-        .map(|finding| {
-            format!(
-                "- [{}][{}][{}] {} `{}`:{} — {}\n  证据：{}\n  问题：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
-                finding.priority,
-                finding.kind.as_str(),
-                finding.confidence,
-                finding.category,
-                finding.path,
-                finding.line,
-                finding.title,
-                one_line(&finding.evidence),
-                one_line(&finding.issue),
-                one_line(&finding.project_context),
-                one_line(&finding.impact),
-                one_line(&finding.fix),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let summary_only = unposted.into_iter().chain(&validated.summary_findings)
-        .map(|finding| {
-            format!(
-                "- [{}][{}][{}] {} `{}`:{} — {}\n  问题：{}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  修复建议：{}",
-                finding.priority,
-                finding.kind.as_str(),
-                finding.confidence,
-                finding.category,
-                finding.path,
-                finding.line,
-                finding.title,
-                one_line(&finding.issue),
-                one_line(&finding.evidence),
-                one_line(&finding.project_context),
-                one_line(&finding.impact),
-                one_line(&finding.fix),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let unplaced = validated
-        .unplaced_findings
-        .iter()
-        .map(|finding| {
-            format!(
-                "- [{}][{}][{}] {}: {}",
-                finding.priority, finding.kind, finding.confidence, finding.title, finding.reason
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let observations = validated
-        .observations
-        .iter()
-        .map(|observation| {
-            format!(
-                "- [{}][{}] {}{}{}\n  证据：{}\n  项目上下文：{}\n  影响：{}\n  下一步：{}",
-                observation
-                    .confidence
-                    .as_deref()
-                    .and_then(normalize_confidence)
-                    .unwrap_or_else(|| "low".into()),
-                observation.category.as_deref().unwrap_or("Observation"),
-                observation
-                    .title
-                    .as_deref()
-                    .unwrap_or("Untitled observation"),
-                observation
-                    .path
-                    .as_deref()
-                    .map(|path| format!(" `{path}`"))
-                    .unwrap_or_default(),
-                observation
-                    .line
-                    .map(|line| format!(":{line}"))
-                    .unwrap_or_default(),
-                one_line(observation.evidence.as_deref().unwrap_or("")),
-                one_line(observation.project_context.as_deref().unwrap_or("")),
-                one_line(observation.impact.as_deref().unwrap_or("")),
-                one_line(observation.next_step.as_deref().unwrap_or("")),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let investigation = if validated.investigation_log.is_empty() {
-        "无".into()
-    } else {
-        validated
-            .investigation_log
-            .iter()
-            .take(12)
-            .map(|item| format!("- {}", one_line(item)))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let coverage = validated
-        .coverage
-        .as_ref()
-        .map(ReviewCoverage::summary_lines)
-        .unwrap_or_else(|| "coverage unavailable".into());
-    let verification = verification_summary(&validated.verification);
-    let residual = if validated.residual_risk.is_empty() {
-        "无".into()
-    } else {
-        validated
-            .residual_risk
-            .iter()
-            .map(|risk| format!("- {risk}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let changed_files = changed_file_summary(&trigger.pr);
-    let inline_reference = match (&published.inline_review_id, &published.inline_review_url) {
-        (Some(id), Some(url)) => format!("GitHub 审查 ID {id}，链接 {url}"),
-        (Some(id), None) => format!("GitHub 审查 ID {id}"),
-        (None, Some(url)) => format!("GitHub 审查链接 {url}"),
-        (None, None) => "未创建行内审查对象".into(),
-    };
-    format!(
-        r#"{AGENT_LINE}
-
-请为 {repo} PR #{pr_number}「{title}」撰写最终 GitHub PR 审查报告。
-
-评论表达规范：
-{style}
-
-规则：
-- 只返回严格 JSON：{{"report":"...markdown..."}}，不调用工具或重新调查。
-- 覆盖范围以插件提供的文件级状态为准：定向或全局抽查不能补成完整审查，pending/failed/no_patch/oversized_partial 均不可计入已审。不得仅根据清单大小宣称全部文件审查完成。
-- 首段直接给出与已审范围相符的结论；未审、失败或未执行验证时说明限制。没有问题时写“在已审范围内未发现需要修复的问题”，不批准合并。
-- 已有行评只列优先级、简短问题和位置，避免复制整条行评。待核实建议与确定问题分开；不能把“没发出行评”等同于“没有问题”。
-- 仅总结的问题保留触发条件、影响、依据与最小修复方向。未确认的前提必须明确标注，不提高置信度，不虚构命令、代码事实或验证结果。
-- 详细证据、覆盖、检查结果和剩余风险放入有内容的 <details>；没有内容就省略，不填“无”占位。
-- 不强制生成“合并评估”“做了什么”等重复章节，不另造行动清单。通常几段或几条列表即可，关键证据不能省掉。
-- 不包含 marker、身份行、会话或 SHA；插件会添加。不要让用户再运行 GitHub API 命令。
-
-审查结果：
-- 覆盖范围：{coverage}
-- 已发布行内评论：{inline_count}
-- 行内审查引用：{inline_reference}
-- 仅总结发现：{summary_only_count}
-- 观察：{observation_count}
-- 暂无法定位的发现：{unplaced_count}
-- 最高风险：{highest_risk}
-
-变更文件：
-```text
-{changed_files}
-```
-
-实际已发布的行内发现：
-```text
-{inline}
-```
-
-仅总结的发现：
-```text
-{summary_only}
-```
-
-无法定位的发现说明：
-```text
-{unplaced}
-```
-
-观察：
-```text
-{observations}
-```
-
-调查记录：
-```text
-{investigation}
-```
-
-值得关注的确定性检查：
-```text
-{verification}
-```
-
-剩余风险：
-```text
-{residual}
-```
-"#,
-        style = COMMENT_STYLE_PROMPT,
-        AGENT_LINE = AGENT_LINE,
-        repo = trigger.repo,
-        pr_number = trigger.pr.number,
-        title = trigger.pr.title,
-        coverage = coverage,
-        inline_count = published.inline_comments_posted,
-        inline_reference = inline_reference,
-        summary_only_count = summary_only_count,
-        observation_count = validated.observations.len(),
-        unplaced_count = published.unplaced_findings_count,
-        highest_risk = published.highest_risk.as_deref().unwrap_or("无"),
-        changed_files = changed_files,
-        inline = if inline.trim().is_empty() {
-            "无"
-        } else {
-            &inline
-        },
-        summary_only = if summary_only.trim().is_empty() {
-            "无"
-        } else {
-            &summary_only
-        },
-        unplaced = if unplaced.trim().is_empty() {
-            "无"
-        } else {
-            &unplaced
-        },
-        observations = if observations.trim().is_empty() {
-            "无"
-        } else {
-            &observations
-        },
-        investigation = investigation,
-        verification = verification,
-        residual = residual,
-    )
-}
-
-fn sanitize_final_report(report: &str) -> String {
-    let mut text = report.trim().to_owned();
-    let outer_fence = text
-        .strip_prefix("```markdown")
-        .or_else(|| text.strip_prefix("```md"))
-        .or_else(|| text.strip_prefix("```"))
-        .map(str::to_owned);
-    if let Some(stripped) = outer_fence
-    {
-        text = stripped.trim().to_owned();
-        if let Some(stripped) = text.strip_suffix("```") {
-            text = stripped.trim().to_owned();
-        }
-    }
-    let filtered = text
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.starts_with("<!-- astrcode-auto-review")
-                && trimmed != AGENT_LINE
-                && !trimmed.starts_with("Review session:")
-                && !trimmed.starts_with("审查会话：")
-                && !trimmed.starts_with("Trigger:")
-                && !trimmed.starts_with("Trigger comment:")
-                && !trimmed.starts_with("触发：")
-                && !trimmed.starts_with("触发评论：")
-                && !trimmed.starts_with("Head SHA:")
-                && !trimmed.starts_with("Head SHA：")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned();
-    let mut text = filtered;
-    if text.chars().count() > 14_000 {
-        text = text.chars().take(14_000).collect::<String>();
-        text.push_str("\n\n...（最终报告过长，已截断）");
-    }
-    text
-}
-
 fn final_review_comment_body(
     config: &Config,
     trigger: &ReviewTrigger,
     session_id: &str,
     validated: &ValidatedReview,
     published: &PublishedReview,
-    report: &str,
 ) -> String {
+    let mut body = final_review_header(config, trigger, validated);
+    body.push_str(&render_final_report(validated, published));
+    let mut metadata = review_comments::metadata(trigger, session_id);
+    if let Some(id) = published.inline_review_id {
+        metadata.push_str(&format!("\n- GitHub 审查 ID：{id}"));
+    }
+    review_comments::fold(&mut body, "执行信息", &metadata);
+    body
+}
+
+fn final_review_header(config: &Config, trigger: &ReviewTrigger, validated: &ValidatedReview) -> String {
     let status = if review_comments::is_partial(validated) {
         "部分完成"
     } else {
         "审查完成"
     };
     let sha = &trigger.pr.head_ref_oid;
-    let mut body = format!(
+    format!(
         "{}\n{AGENT_LINE}\n\n**{status}** · 审查版本 `{}`\n\n",
         config.comment_marker,
         &sha[..sha.len().min(12)],
-    );
-    body.push_str(&review_global::summary(validated));
-    if let Some(coverage) = &validated.coverage {
-        let skipped = coverage.entries.values().filter(|e| e.status == CoverageStatus::SkippedGenerated).count();
-        body.push_str(&format!("\n文件阶段覆盖：{}/{}；生成文件跳过 {}。全局复核不会将未审文件计为已审。\n", coverage.reviewed_count(), coverage.total_count(), skipped));
-        review_comments::fold(&mut body, "程序记录的文件覆盖", &coverage.summary_lines());
-    }
-    body.push_str(&format!("\n{}\n", report.trim()));
-    if let Some(url) = &published.inline_review_url {
-        body.push_str(&format!(
-            "\n[查看 {} 条行评]({url})\n",
-            published.inline_comments_posted
-        ));
-    }
-    if published.unplaced_findings_count > 0 {
-        body.push_str(&format!(
-            "\n{} 个问题未能行内定位或发布，请查看报告中的证据与限制。\n",
-            published.unplaced_findings_count
-        ));
-    }
-    review_comments::fold(
-        &mut body,
-        "执行信息",
-        &review_comments::metadata(trigger, session_id),
-    );
-    body
+    )
 }
 
-fn fallback_final_report(
+fn render_final_report(
     validated: &ValidatedReview,
     published: &PublishedReview,
-    generation_error: Option<&str>,
 ) -> String {
     let mut body = review_comments::conclusion(validated);
     body.push('\n');
-    for finding in &validated.inline_findings {
-        body.push_str(&review_comments::finding_index(finding));
+    for finding in validated.inline_findings.iter().chain(&validated.summary_findings) {
+        let posted = published.posted_findings.iter().any(|receipt| receipt.fingerprint == finding_fingerprint(finding));
+        let index = review_comments::finding_index(finding);
+        body.push_str(index.trim_end());
+        body.push_str(if posted { " · 已发布行评\n" } else { " · 总览保留\n" });
+    }
+    if let Some(url) = &published.inline_review_url {
+        body.push_str(&format!("\n[查看 {} 条行评]({url})\n\n", published.inline_comments_posted));
+    }
+    for observation in &validated.observations {
+        body.push_str(&review_comments::observation_index(observation));
     }
     body.push('\n');
     // The finding order need not match successful publication order. Retain all evidence.
@@ -3330,11 +3011,7 @@ fn fallback_final_report(
         .collect::<Vec<_>>()
         .join("\n");
     review_comments::fold(&mut body, "无法行内定位的问题", &unplaced);
-    review_comments::fold(
-        &mut body,
-        "覆盖范围",
-        &coverage_summary_for_comment(validated.coverage.as_ref()),
-    );
+    review_comments::review_details(&mut body, validated);
     review_comments::fold(
         &mut body,
         "验证结果",
@@ -3346,9 +3023,6 @@ fn fallback_final_report(
         .map(|risk| format!("- {risk}"))
         .collect::<Vec<_>>()
         .join("\n");
-    if generation_error.is_some() {
-        residual.push_str("\n- 报告整理未完成，以上直接呈现已保存的审查结果，未追加新的结论。");
-    }
     if published.unplaced_findings_count > 0 {
         residual.push_str(&format!(
             "\n- {} 个问题未能行内定位或发布。",

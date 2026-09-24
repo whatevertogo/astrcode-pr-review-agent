@@ -46,7 +46,7 @@ pub(super) fn validate(
         summary_findings: Vec::new(),
         unplaced_findings: Vec::new(),
         observations: output.observations.clone(),
-        investigation_log: Vec::new(),
+        investigation_log: output.investigation_log.clone(),
         verification: output.verification.clone(),
         residual_risk: output.residual_risk.clone(),
         summary: output.summary.clone(),

@@ -248,6 +248,13 @@ pub(super) fn publish(
         .split_once("\n\n")
         .map(|(_, body)| body)
         .unwrap_or(&rendered);
+    let content = review_comments::publication_content(
+        content,
+        &result.review,
+        result.publication.review_url.as_deref(),
+        &output.join("full-final-report.md"),
+        55_000,
+    )?;
     let summary = update_summary(
         snapshot,
         if result.status == "complete" {
@@ -255,7 +262,7 @@ pub(super) fn publish(
         } else {
             "部分完成"
         },
-        content,
+        &content,
         output,
     )?;
     result.publication.summary_id = summary.summary_id;
