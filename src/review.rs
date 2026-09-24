@@ -3237,11 +3237,9 @@ fn fallback_final_report(
     generation_error: Option<&str>,
 ) -> String {
     let mut body = review_comments::conclusion(validated);
+    body.push('\n');
     for finding in &validated.inline_findings {
-        body.push_str(&format!(
-            "\n- **[{}] {}** · `{}`:{}",
-            finding.priority, finding.title, finding.path, finding.line
-        ));
+        body.push_str(&review_comments::finding_index(finding));
     }
     body.push('\n');
     // The finding order need not match successful publication order. Retain all evidence.
@@ -3249,17 +3247,15 @@ fn fallback_final_report(
         .inline_findings
         .iter()
         .chain(&validated.summary_findings)
-        .map(review_comments::finding)
-        .collect::<Vec<_>>()
-        .join("\n");
-    review_comments::fold(&mut body, "发现与建议的完整依据", &findings);
+        .map(review_comments::finding_details)
+        .collect::<Vec<_>>();
+    review_comments::fold_items(&mut body, "发现与建议的完整依据", &findings);
     let observations = validated
         .observations
         .iter()
         .map(review_comments::observation)
-        .collect::<Vec<_>>()
-        .join("\n");
-    review_comments::fold(&mut body, "待核实的观察", &observations);
+        .collect::<Vec<_>>();
+    review_comments::fold_items(&mut body, "待核实的观察", &observations);
     let unplaced = validated
         .unplaced_findings
         .iter()
@@ -3816,12 +3812,12 @@ fn verification_summary(items: &[VerificationItem]) -> String {
         .iter()
         .filter(|item| item.status.as_deref() != Some("passed"))
         .map(|item| {
-            format!(
-                "- `{}`: {} ({})",
-                item.command.as_deref().unwrap_or("未指定"),
-                item.status.as_deref().unwrap_or("未知"),
+            review_comments::list_item(&format!(
+                "{} · {}\n\n{}",
+                review_comments::code(item.command.as_deref().unwrap_or("未指定")),
+                review_comments::text(item.status.as_deref().unwrap_or("未知")),
                 item.notes.as_deref().unwrap_or("无备注")
-            )
+            ))
         })
         .collect::<Vec<_>>();
     if noteworthy.is_empty() {

@@ -42,10 +42,7 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
     if !result.review.inline_findings.is_empty() {
         body.push('\n');
         for finding in &result.review.inline_findings {
-            body.push_str(&format!(
-                "- **[{}] {}** — `{}`:{}\n",
-                finding.priority, finding.title, finding.path, finding.line
-            ));
+            body.push_str(&review_comments::finding_index(finding));
         }
     }
     if let Some(url) = &result.publication.review_url {
@@ -58,18 +55,16 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
         .review
         .summary_findings
         .iter()
-        .map(inline)
-        .collect::<Vec<_>>()
-        .join("\n");
-    fold(&mut body, "其他发现与建议", &details);
+        .map(review_comments::finding_details)
+        .collect::<Vec<_>>();
+    review_comments::fold_items(&mut body, "其他发现与建议", &details);
     let observations = result
         .review
         .observations
         .iter()
         .map(review_comments::observation)
-        .collect::<Vec<_>>()
-        .join("\n");
-    fold(&mut body, "待核实的观察", &observations);
+        .collect::<Vec<_>>();
+    review_comments::fold_items(&mut body, "待核实的观察", &observations);
     let unplaced = result
         .review
         .unplaced_findings
@@ -96,16 +91,16 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
     fold(
         &mut body,
         "已执行验证",
-        &format_verification_items(&result.review.verification),
+        &verification_summary(&result.review.verification),
     );
-    let mut usage=String::from("| 阶段 | 状态 | 输入 | 缓存输入 | 输出 | 模型请求 | 工具调用 | 秒 |\n|---|---|---:|---:|---:|---:|---:|---:|\n");
+    let mut usage = String::from("| 阶段 | 状态 | Token 用量 | 执行 |\n|---|---|---|---|\n");
     let mut usage_notes = String::new();
     for stage in &result.stages {
         let u = &stage.usage;
         usage.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            stage.label,
-            stage.status,
+            "| {} | {} | 输入 {}<br>缓存输入 {}<br>输出 {} | 请求 {}<br>工具 {}<br>{} 秒 |\n",
+            review_comments::text(&stage.label),
+            review_comments::text(&stage.status),
             u.input_tokens,
             u.cached_input_tokens,
             u.output_tokens,
@@ -116,7 +111,7 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
         if u.missing_usage_requests + u.estimated_requests + u.unknown_accounting_requests > 0 {
             usage_notes.push_str(&format!(
                 "\n{}：估算/未知来源 {} 次，缺少用量 {} 次，缓存口径未知 {} 次。\n",
-                stage.label,
+                review_comments::text(&stage.label),
                 u.estimated_requests,
                 u.missing_usage_requests,
                 u.unknown_accounting_requests
@@ -125,7 +120,9 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
     }
     usage.push_str(&usage_notes);
     usage.push_str("\n缓存输入是分类统计，不能再次加到总输入；推理输出是输出的一部分。费用需要另按实际供应商价格计算。\n");
-    fold(&mut body, "模型用量与耗时", &usage);
+    if !result.stages.is_empty() {
+        fold(&mut body, "模型用量与耗时", &usage);
+    }
     fold(
         &mut body,
         "剩余风险",

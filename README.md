@@ -128,6 +128,13 @@ Re-render a saved result without running a model or contacting GitHub:
 cargo run --example render_review -- path/to/result.json > preview.md
 ```
 
+Presentation uses GitHub-supported Markdown: block evidence starts separately from
+its label, populated detail groups include counts, and separate findings retain
+their file/line and have visual dividers. Plain titles and table cells are escaped;
+code paths with backticks use a matching longer delimiter. Usage tables use four
+columns with line breaks inside cells so narrower comment panes stay readable.
+No custom CSS or external badges are emitted in GitHub comments.
+
 This changes presentation only; it does not repair or revalidate historical findings.
 
 ## Reliable comment receipt

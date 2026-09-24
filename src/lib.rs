@@ -1111,6 +1111,72 @@ One concrete finding and one repo-history reminder.
     }
 
     #[test]
+    fn github_markdown_preserves_blocks_and_escapes_metadata() {
+        let mut finding = validated_finding("P2", "状态 **错误**\n# 下一行 <tag>", 10);
+        finding.path = "src/a`b.rs".into();
+        finding.project_context.clear();
+        for evidence in [
+            "- 第一项\n- 第二项",
+            "1. 第一步\n2. 第二步",
+            "```rust\nreturn Err(error);\n```",
+            "> 触发条件成立",
+            "| 条件 | 结果 |\n|---|---|\n| 重试 | 失败 |",
+        ] {
+            finding.evidence = evidence.into();
+            let body = review_comments::finding(&finding);
+            assert!(body.contains(&format!("**依据**\n\n{evidence}\n")));
+            assert!(!body.contains("<details>"));
+            assert!(!body.contains("\n# 下一行"));
+            assert!(body.contains("\\*\\*错误\\*\\*"));
+            assert!(body.contains("&lt;tag&gt;"));
+        }
+        assert!(review_comments::finding_details(&finding).contains("`` src/a`b.rs:10 · RIGHT ``"));
+        let long_path = format!("src/{}  name.rs", "a".repeat(510));
+        assert_eq!(review_comments::code(&long_path), format!("`{long_path}`"));
+        let mut folded = "前一段".to_owned();
+        review_comments::fold(&mut folded, "A < B & C", "- 内容");
+        assert!(folded.contains("前一段\n\n<details>"));
+        assert!(folded.contains("<summary>A &lt; B &amp; C</summary>\n\n- 内容\n\n</details>"));
+
+        let mut raw = json!({
+            "schema_version":3,"input_key":"fixture","repo":"example/repo","pr_number":1,
+            "base_sha":"aaaa","head_sha":"bbbb","model":{},"pipeline":"quality_first","status":"partial",
+            "review": {"inline_findings":[],"summary_findings":[finding, finding],
+                "unplaced_findings":[],"observations":[],"investigation_log":[],
+                "verification":[],"residual_risk":[],"summary":null,"coverage":null,"debug_dir":null},
+            "stages":[]
+        });
+        for (checks, expected) in [
+            (json!([]), "未记录实际执行的检查"),
+            (
+                json!([{"command":"cargo test","status":"passed"}]),
+                "1 项确定性检查通过",
+            ),
+            (
+                json!([{"command":"echo `x`","status":"failed","notes":"第一行\n\n```text\nerror\n```"}]),
+                "- `` echo `x` `` · failed\n  \n  第一行",
+            ),
+        ] {
+            raw["review"]["verification"] = checks;
+            let body = render_review_result(&raw.to_string()).unwrap();
+            assert!(body.contains(expected), "{body}");
+            assert!(!body.contains("不要汇总"));
+            assert!(!body.contains("模型用量与耗时"));
+            assert!(body.contains("其他发现与建议（2）"));
+            assert!(body.contains("\n\n---\n\n"));
+        }
+        raw["stages"] = json!([{
+            "label":"file | <x>\nextra","input_key":"fixture","session_id":"fixture",
+            "started_at":0,"elapsed_seconds":3,"status":"complete","error":null,
+            "usage":{"input_tokens":10,"cached_input_tokens":4,"cache_creation_input_tokens":0,
+                "uncached_input_tokens":6,"output_tokens":2,"reasoning_output_tokens":0,
+                "requests":1,"tool_calls":0,"estimated_requests":0,"unknown_accounting_requests":0,"missing_usage_requests":0}
+        }]);
+        let body = render_review_result(&raw.to_string()).unwrap();
+        assert!(body.contains("| file \\| &lt;x&gt; extra | complete | 输入 10<br>缓存输入 4<br>输出 2 | 请求 1<br>工具 0<br>3 秒 |"));
+    }
+
+    #[test]
     fn comments_preserve_evidence_and_label_uncertainty_without_repeated_metadata() {
         let config = Config::default();
         for (kind, confidence, uncertain) in [
