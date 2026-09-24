@@ -141,6 +141,10 @@ fn validate_finding_fields(
             format!("invalid confidence `{confidence}`; expected high, medium, or low"),
         ))
     })?;
+    let non_blocking = finding.non_blocking
+        && kind == FindingKind::Advisory
+        && confidence == "high";
+    let priority = if non_blocking { "P3".to_owned() } else { priority };
     let category = required_field(&finding.category, "category", finding)?;
     let path = finding
         .path
@@ -168,6 +172,7 @@ fn validate_finding_fields(
     Ok(ValidatedFinding {
         priority,
         kind,
+        non_blocking,
         confidence,
         category,
         path,

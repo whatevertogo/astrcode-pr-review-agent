@@ -26,7 +26,7 @@ pub(crate) const CONTRACT: &str = r#"
 对每个 C 编号返回且仅返回一条 candidate_checks：
 {"id":"C001","outcome":"confirmed|advisory|observation|rejected","result_index":0,"reason":"具体源码位置、关键事实及保留或排除理由"}
 result_index 为对应最终 confirmed_findings/advisory_findings/observations 数组中的零基索引；rejected 时为 null。重复候选可以指向同一最终条目。只有确切反例、重复、既有问题或明确不适用的证据才能 rejected；未解决的可执行疑点保留 observation，说明缺口与下一步，不能静默丢失。
-新增问题同样必须有触发条件、因果、证据与影响。最终 observations、residual_risk 去重并去除已反证项；不要复制早期已过时的担忧。
+新增缺陷同样必须有触发条件、因果、证据与影响；非阻塞改进必须有具体代码依据、收益与取舍，使用 advisory、non_blocking=true、P3、high；仍待确认的前提保留 observation。最终 observations、residual_risk 去重并去除已反证项；不要复制早期已过时的担忧。
 JSON 输出时包含 global_review_complete:true 与 candidate_checks；其余字段保持原 JSON 协议。
 若使用标签协议，额外输出 <global_review_complete>true</global_review_complete>，并逐条输出 <candidate_check id="C001" outcome="rejected">具体证据与理由</candidate_check>；保留条目用 result_index="0" 指向对应 kind 的 finding 或 observation 顺序。不遗漏编号，不以“无问题”代替复核。
 global_review_complete 只表明本阶段完成，不扩大文件级覆盖；前片未完整审查的文件仍为未审。

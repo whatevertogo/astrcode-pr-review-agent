@@ -20,31 +20,20 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
         },
         &result.head_sha[..result.head_sha.len().min(12)]
     );
-    body.push_str(&review_global::summary(&result.review));
-    if let Some(coverage) = &result.review.coverage {
-        body.push_str(&format!(
-            "文件审查：{} / {}。验证状态：{}。\n\n",
-            coverage.reviewed_count(),
-            coverage.total_count(),
-            if result
-                .review
-                .verification
-                .iter()
-                .all(|item| item.status.as_deref() == Some("passed"))
-                && !result.review.verification.is_empty()
-            {
-                "已执行的检查通过"
-            } else {
-                "尚未全部完成，请展开验证详情"
-            }
-        ));
-    }
     body.push_str(&conclusion(&result.review));
-    if !result.review.inline_findings.is_empty() {
+    if !result.review.inline_findings.is_empty() || !result.review.summary_findings.is_empty() {
         body.push('\n');
-        for finding in &result.review.inline_findings {
+        for finding in result
+            .review
+            .inline_findings
+            .iter()
+            .chain(&result.review.summary_findings)
+        {
             body.push_str(&review_comments::finding_index(finding));
         }
+    }
+    for observation in &result.review.observations {
+        body.push_str(&review_comments::observation_index(observation));
     }
     if let Some(url) = &result.publication.review_url {
         body.push_str(&format!("\n[查看行内审查]({url})\n"));
@@ -79,16 +68,7 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     fold(&mut body, "无法行内定位的问题", &unplaced);
-    fold(
-        &mut body,
-        "覆盖范围",
-        &result
-            .review
-            .coverage
-            .as_ref()
-            .map(ReviewCoverage::summary_lines)
-            .unwrap_or_else(|| "未记录覆盖范围".into()),
-    );
+    review_comments::review_details(&mut body, &result.review);
     fold(
         &mut body,
         "已执行验证",

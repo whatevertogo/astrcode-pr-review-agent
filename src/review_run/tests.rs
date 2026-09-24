@@ -259,6 +259,7 @@ pub(super) fn finding(
     confidence: &str,
 ) -> ReviewFinding {
     ReviewFinding {
+        non_blocking: false,
         severity: Some(priority.into()),
         confidence: Some(confidence.into()),
         category: Some("Correctness".into()),
@@ -310,7 +311,7 @@ fn strict_locations_filter_before_limit_and_preserve_non_inline_evidence() {
         .as_deref()
         .unwrap()
         .starts_with("[P1]"));
-    assert!(report::conclusion(&result).contains("已确认 3"));
+    assert!(report::conclusion(&result).contains("已确认 4"));
     assert!(result.observations[0]
         .evidence
         .as_deref()
@@ -339,7 +340,7 @@ fn strict_locations_filter_before_limit_and_preserve_non_inline_evidence() {
     );
     assert!(zero.inline_findings.is_empty());
     assert_eq!(zero.summary_findings.len(), 6);
-    assert!(report::conclusion(&zero).contains("已确认 3"));
+    assert!(report::conclusion(&zero).contains("已确认 4"));
 }
 
 #[test]

@@ -2,23 +2,18 @@
 use super::*;
 
 pub(crate) fn finding(finding: &ValidatedFinding) -> String {
-    let qualifier = if finding.kind == FindingKind::Advisory || finding.confidence != "high" {
-        "待核实建议 · "
-    } else {
-        ""
-    };
-    let mut body = format!(
-        "**[{}] {qualifier}{}**\n\n{}\n",
-        text(&finding.priority),
-        text(&finding.title),
-        finding.issue.trim(),
-    );
-    for (label, value) in [
-        ("影响", &finding.impact),
-        ("依据", &finding.evidence),
-        ("建议", &finding.fix),
+    let mut body = format!("**{}**\n", finding_heading(finding));
+    let mut seen = BTreeSet::new();
+    for value in [
+        &finding.issue,
+        &finding.impact,
+        &finding.evidence,
+        &finding.fix,
     ] {
-        field(&mut body, label, value);
+        let value = value.trim();
+        if !value.is_empty() && seen.insert(value) {
+            body.push_str(&format!("\n{value}\n"));
+        }
     }
     let context = finding.project_context.trim();
     if ![
@@ -48,7 +43,7 @@ pub(crate) fn observation(observation: &ReviewObservation) -> String {
         })
         .unwrap_or_default();
     let mut body = format!(
-        "**待核实：{}**{location}\n",
+        "**需要确认：{}**{location}\n",
         text(observation.title.as_deref().unwrap_or("尚未确立的问题"))
     );
     let mut seen = BTreeSet::new();
@@ -130,13 +125,62 @@ pub(crate) fn code(value: &str) -> String {
     format!("{fence} {value} {fence}")
 }
 
+fn finding_heading(finding: &ValidatedFinding) -> String {
+    let label = if finding.kind == FindingKind::Advisory
+        && finding.non_blocking
+        && finding.confidence == "high"
+    {
+        "建议（非阻塞）".to_owned()
+    } else if finding.kind == FindingKind::Advisory || finding.confidence != "high" {
+        format!("[{}] 需要确认", text(&finding.priority))
+    } else {
+        format!("[{}]", text(&finding.priority))
+    };
+    format!("{label} {}", text(&finding.title))
+}
+
 pub(crate) fn finding_index(finding: &ValidatedFinding) -> String {
     format!(
-        "- **[{}] {}** · {}\n",
-        text(&finding.priority),
-        text(&finding.title),
+        "- **{}** · {}\n",
+        finding_heading(finding),
         code(&format!("{}:{}", finding.path, finding.line)),
     )
+}
+
+pub(crate) fn observation_index(observation: &ReviewObservation) -> String {
+    format!(
+        "- **需要确认：{}**\n",
+        text(observation.title.as_deref().unwrap_or("尚未确立的问题"))
+    )
+}
+
+/// Counts and coverage come only from receipts, never a second model summary.
+pub(crate) fn review_details(body: &mut String, review: &ValidatedReview) {
+    let mut details = review_global::summary(review);
+    if let Some(coverage) = &review.coverage {
+        let skipped = coverage
+            .entries
+            .values()
+            .filter(|e| e.status == CoverageStatus::SkippedGenerated)
+            .count();
+        details.push_str(&format!(
+            "文件阶段已审 {} / {}；生成文件跳过 {}。\n\n{}",
+            coverage.reviewed_count(),
+            coverage.total_count(),
+            skipped,
+            coverage.summary_lines()
+        ));
+    } else {
+        details.push_str("未记录文件级覆盖范围。");
+    }
+    fold(body, "审查覆盖与全局复核", &details);
+    let facts = review
+        .investigation_log
+        .iter()
+        .map(|s| list_item(s))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fold(body, "核查依据", &facts);
 }
 
 pub(crate) fn list_item(content: &str) -> String {
@@ -200,14 +244,10 @@ pub(crate) fn conclusion(review: &ValidatedReview) -> String {
         .inline_findings
         .iter()
         .chain(&review.summary_findings)
-        .filter(|finding| {
-            finding.kind == FindingKind::Confirmed
-                && finding.confidence == "high"
-                && priority_rank(&finding.priority) <= 2
-        })
+        .filter(|finding| finding.kind == FindingKind::Confirmed && finding.confidence == "high")
         .count();
     if significant > 0 {
-        format!("已确认 {significant} 个高置信度 P0–P2 问题，建议先处理这些问题。\n")
+        format!("已确认 {significant} 个有充分证据的问题，建议先处理这些问题。\n")
     } else if !review.unplaced_findings.is_empty() {
         format!(
             "有 {} 条未能定位或完整验证的问题记录，请查看详情中的依据与限制。\n",
@@ -220,6 +260,6 @@ pub(crate) fn conclusion(review: &ValidatedReview) -> String {
     {
         "本次尚未完成文件级审查，不能据此得出没有问题的结论。\n".into()
     } else {
-        "在已审范围内未发现需要修复的高置信度 P0–P2 问题。\n".into()
+        "在已审范围内未发现需要修复的高置信度问题。\n".into()
     }
 }

@@ -10,5 +10,7 @@
 finding 必须包含以下字段，内容遵循共享证据要求和评论风格：
 {"severity":"P2","confidence":"high","category":"Correctness","path":"src/example.rs","side":"RIGHT","line":12,"title":"具体的错误行为","issue":"触发条件及当前行为","evidence":"位置与关键证据","project_context":"必要的约束或验证边界","impact":"实际影响","fix":"最小修复方向"}
 
+非阻塞改进放入 advisory_findings，增加 "non_blocking":true，severity="P3"、confidence="high"；缺省 false。缺少关键前提的疑点放入 observations。
+
 observation 使用 confidence/category/path/line/title/evidence/project_context/impact/next_step 字段。缺少关键前提时不冒充确认问题。
 files_reviewed 只填本分片已完整检查全部变更的精确相对路径，无括注、行号或说明；不承诺其他分片已审。investigation_log 至多 5 条含 path:line 的简洁源码事实，不写猜测或命令日志。无发现时返回空数组，不据此批准合并。

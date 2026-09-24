@@ -79,8 +79,8 @@ pub(super) async fn analyze(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
-            let mut prompt = format!("{}\n\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n适用仓库规则:\n{}\n已有验证:\n{}\n先前分片的结构化结论（用于定位和复用背景，最终问题仍须复核）:\n{}\n本轮文件（只检查这些变更，可读取相关消费者）:\n{}",
-                PROMPT_VERSION, snapshot.pr.title, snapshot.pr.body.as_deref().unwrap_or(""), snapshot.base_sha,
+            let mut prompt = format!("{}\n{}\n\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n适用仓库规则:\n{}\n已有验证:\n{}\n先前分片的结构化结论（用于定位和复用背景，最终问题仍须复核）:\n{}\n本轮文件（只检查这些变更，可读取相关消费者）:\n{}",
+                PROMPT_VERSION, FILE_REVIEW_PROMPT, snapshot.pr.title, snapshot.pr.body.as_deref().unwrap_or(""), snapshot.base_sha,
                 snapshot.pr.head_ref_oid, worktree.display(), instructions, format_verification_items(&snapshot.checks),
                 context::prior_conclusions(&outputs), shard.files.iter().map(|file| file.annotated_patch.as_str()).collect::<Vec<_>>().join("\n"));
             if !snapshot.request.is_empty() {
@@ -196,8 +196,8 @@ pub(super) async fn analyze(
                 .join("\n");
             // Pass conclusions, not their complete investigation transcripts or patches.
             let candidates = context::adjudication_context(&output, &outputs);
-            let mut prompt = format!("{}\n\n这是最终全局复核阶段。逐条验证候选的触发条件、影响、调用方约束、反例及本次 diff 因果关系；删除不成立或重复的问题。检查跨文件契约及调用者，可读取固定版本代码。返回完整的最终发现集合（不是增量）；只有实际复核成立的问题放 confirmed_findings。同时核对观察与剩余风险：删除已被反证、与最终结论冲突或重复的条目，其余保留完整证据和影响。返回最终 observations 与 residual_risk，不会自动追加分片旧观察。无证据的猜测不得升级。\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n规则:\n{}\n验证:\n{}\n文件清单:\n{}\n未完整检查:\n{:?}\n候选:\n{}",
-                PROMPT_VERSION, snapshot.pr.title, snapshot.pr.body.as_deref().unwrap_or(""), snapshot.base_sha, snapshot.pr.head_ref_oid,
+            let mut prompt = format!("{}\n{}\n\n这是最终全局复核阶段。逐条验证候选的触发条件、影响、调用方约束、反例及本次 diff 因果关系；删除不成立或重复的问题。检查跨文件契约及调用者，可读取固定版本代码。返回完整的最终发现集合（不是增量）；只有实际复核成立的问题放 confirmed_findings。同时核对观察与剩余风险：删除已被反证、与最终结论冲突或重复的条目，其余保留完整证据和影响。返回最终 observations 与 residual_risk，不会自动追加分片旧观察。无证据的猜测不得升级。\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n规则:\n{}\n验证:\n{}\n文件清单:\n{}\n未完整检查:\n{:?}\n候选:\n{}",
+                PROMPT_VERSION, GLOBAL_REVIEW_PROMPT, snapshot.pr.title, snapshot.pr.body.as_deref().unwrap_or(""), snapshot.base_sha, snapshot.pr.head_ref_oid,
                 worktree.display(), instructions, format_verification_items(&snapshot.checks), short_context_for_global_pass(&snapshot.context), incomplete, candidates);
             if !snapshot.request.is_empty() {
                 prompt.push_str(&format!("\n本次审查要求：{}", snapshot.request));
@@ -546,10 +546,8 @@ async fn baseline(
             verification: review.verification.clone(),
             posted_findings: Vec::new(),
         };
-        let report =
-            final_comment_report_pass(config, host, &session, &trigger, &review, &published)
-                .await?;
-        fs::write(options.output.join("baseline-model-report.md"), report)?;
+        let report = render_final_report(&review, &published);
+        fs::write(options.output.join("baseline-report.md"), report)?;
         anyhow::ensure!(
             model_identity(host)? == initial_model,
             "model configuration changed during review"

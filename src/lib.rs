@@ -102,6 +102,7 @@ mod tests {
 
     fn review_finding(priority: &str, title: &str, line: u64) -> ReviewFinding {
         ReviewFinding {
+            non_blocking: false,
             severity: Some(priority.into()),
             confidence: Some("high".into()),
             category: Some("Correctness".into()),
@@ -119,6 +120,7 @@ mod tests {
 
     fn validated_finding(priority: &str, title: &str, line: u64) -> ValidatedFinding {
         ValidatedFinding {
+            non_blocking: false,
             priority: priority.into(),
             kind: FindingKind::Confirmed,
             confidence: "high".into(),
@@ -846,6 +848,7 @@ One concrete finding and one repo-history reminder.
                 review_finding("P2", "Valid issue", 10),
                 review_finding("P1", "Bad line", 999),
                 ReviewFinding {
+                    non_blocking: false,
                     severity: Some("P3".into()),
                     confidence: Some("high".into()),
                     category: Some("Tests/API Contract".into()),
@@ -956,8 +959,8 @@ One concrete finding and one repo-history reminder.
         );
         assert!(comment_body.starts_with("<!-- astrcode-auto-review -->\n**[P1]"));
         assert!(comment_body.contains("**[P1] Persist storage before returning**"));
-        assert!(comment_body.contains("**影响**：A crash can lose user data."));
-        assert!(comment_body.contains("**建议**：Persist first, then return success."));
+        assert!(comment_body.contains("\n\nA crash can lose user data.\n"));
+        assert!(comment_body.contains("\n\nPersist first, then return success.\n"));
         assert!(body.contains("已发布行内评论：1"));
         assert!(body.contains("暂无法定位的发现：0"));
         assert!(body.contains("已审查文件：1/1"));
@@ -1246,17 +1249,17 @@ One concrete finding and one repo-history reminder.
     }
 
     #[test]
-    fn inline_comment_body_uses_chinese_labels() {
+    fn inline_comment_keeps_evidence_visible_without_field_labels() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
         let body =
             inline_review_comment_body(&config, &validated_finding("P2", "持久化顺序错误", 10));
 
         assert!(body.contains("**[P2] 持久化顺序错误**"));
-        assert!(body.contains("**依据**："));
-        assert!(body.contains("**影响**："));
-        assert!(body.contains("**建议**："));
-        assert!(body.find("**依据**").unwrap() < body.find("<details>").unwrap());
+        assert!(!body.contains("**依据**"));
+        assert!(!body.contains("**影响**"));
+        assert!(!body.contains("**建议**"));
+        assert!(body.find("Checked the annotated diff").unwrap() < body.find("<details>").unwrap());
         assert!(!body.contains("Category:"));
     }
 
@@ -1274,7 +1277,7 @@ One concrete finding and one repo-history reminder.
         ] {
             finding.evidence = evidence.into();
             let body = review_comments::finding(&finding);
-            assert!(body.contains(&format!("**依据**\n\n{evidence}\n")));
+            assert!(body.contains(&format!("\n\n{evidence}\n")));
             assert!(!body.contains("<details>"));
             assert!(!body.contains("\n# 下一行"));
             assert!(body.contains("\\*\\*错误\\*\\*"));
@@ -1329,13 +1332,16 @@ One concrete finding and one repo-history reminder.
     #[test]
     fn comments_preserve_evidence_and_label_uncertainty_without_repeated_metadata() {
         let config = Config::default();
-        for (kind, confidence, uncertain) in [
-            (FindingKind::Confirmed, "high", false),
-            (FindingKind::Advisory, "high", true),
-            (FindingKind::Confirmed, "medium", true),
+        for (kind, confidence, non_blocking, uncertain) in [
+            (FindingKind::Confirmed, "high", false, false),
+            (FindingKind::Advisory, "high", false, true),
+            (FindingKind::Advisory, "high", true, false),
+            (FindingKind::Advisory, "medium", true, true),
+            (FindingKind::Confirmed, "medium", false, true),
         ] {
             let mut finding = validated_finding("P2", "写入前不能报告成功", 10);
             finding.kind = kind;
+            finding.non_blocking = non_blocking;
             finding.confidence = confidence.into();
             finding.evidence = "`write.rs:10` 在返回前没有执行持久化；调用方没有补写路径。".into();
             let body = inline_review_comment_body(&config, &finding);
@@ -1348,7 +1354,15 @@ One concrete finding and one repo-history reminder.
             ] {
                 assert!(visible.contains(fact));
             }
-            assert_eq!(visible.contains("待核实建议"), uncertain);
+            assert_eq!(visible.contains("需要确认"), uncertain);
+            assert_eq!(
+                visible.contains("建议（非阻塞）"),
+                non_blocking && confidence == "high"
+            );
+            assert_eq!(
+                review_comments::finding_index(&finding).contains("需要确认"),
+                uncertain
+            );
             assert!(body.contains(&finding.project_context));
             assert_eq!(body.matches(&finding.evidence).count(), 1);
             assert!(!body.contains(AGENT_LINE));
@@ -1382,6 +1396,34 @@ One concrete finding and one repo-history reminder.
         let examples = parse_review_bot_output(PR_REVIEW_FEW_SHOTS_PROMPT).unwrap();
         assert_eq!(examples.confirmed_findings.len(), 1);
         assert_eq!(examples.observations.len(), 1);
+        assert_eq!(examples.advisory_findings.len(), 1);
+        assert!(examples.advisory_findings[0].non_blocking);
+        let serialized = serde_json::to_value(&examples).unwrap();
+        let mut json_output: ReviewBotOutput = serde_json::from_value(serialized).unwrap();
+        assert!(json_output.advisory_findings[0].non_blocking);
+        json_output.advisory_findings[0].severity = Some("P1".into());
+        let optional =
+            validate_finding_fields(&json_output.advisory_findings[0], FindingKind::Advisory, 0)
+                .unwrap();
+        assert_eq!(optional.priority, "P3");
+        let confirmed =
+            validate_finding_fields(&json_output.advisory_findings[0], FindingKind::Confirmed, 0)
+                .unwrap();
+        assert_eq!(confirmed.priority, "P1");
+        assert!(!confirmed.non_blocking);
+        for confidence in ["medium", "low"] {
+            let mut uncertain = json_output.advisory_findings[0].clone();
+            uncertain.confidence = Some(confidence.into());
+            let uncertain = validate_finding_fields(&uncertain, FindingKind::Advisory, 0).unwrap();
+            assert_eq!(uncertain.priority, "P1");
+            assert!(!uncertain.non_blocking);
+            assert!(review_comments::finding(&uncertain).contains("需要确认"));
+        }
+        assert!(review_comments::finding(&optional).contains("建议（非阻塞）"));
+        let mut legacy = serde_json::to_value(&optional).unwrap();
+        legacy.as_object_mut().unwrap().remove("non_blocking");
+        let legacy: ValidatedFinding = serde_json::from_value(legacy).unwrap();
+        assert!(review_comments::finding(&legacy).contains("需要确认"));
         assert_eq!(
             examples.confirmed_findings[0].path.as_deref(),
             Some("src/enqueue.rs")
@@ -1389,7 +1431,7 @@ One concrete finding and one repo-history reminder.
     }
 
     #[test]
-    fn report_fallback_and_publication_receipts_do_not_overstate_success() {
+    fn deterministic_report_respects_receipts_coverage_and_ignores_model_statistics() {
         let config = Config::default();
         let trigger = ReviewTrigger {
             repo: "owner/repo".into(),
@@ -1426,26 +1468,22 @@ One concrete finding and one repo-history reminder.
             coverage: None,
             debug_dir: None,
         };
-        let prompt = final_comment_report_prompt(&trigger, &review, &published);
-        assert!(prompt.contains("仅总结发现：1"));
-        let posted = prompt
-            .split("实际已发布的行内发现：")
-            .nth(1)
-            .unwrap()
-            .split("仅总结的发现：")
-            .next()
+        review.summary = Some("全部 38 个文件已审，已发布 99 条评论".into());
+        let report = render_final_report(&review, &published);
+        let visible = report.split("<details>").next().unwrap();
+        let first_line = visible
+            .lines()
+            .find(|line| line.contains(&first.title))
             .unwrap();
-        assert!(posted.contains(&second.title));
-        assert!(!posted.contains(&first.title));
-        let unposted = prompt
-            .split("仅总结的发现：")
-            .nth(1)
-            .unwrap()
-            .split("无法定位的发现说明：")
-            .next()
+        let second_line = visible
+            .lines()
+            .find(|line| line.contains(&second.title))
             .unwrap();
-        assert!(unposted.contains(&first.title));
-        assert!(unposted.contains(&first.issue));
+        assert!(first_line.contains("总览保留"));
+        assert!(second_line.contains("已发布行评"));
+        assert!(visible.contains("[查看 1 条行评]"));
+        assert!(!report.contains("38"));
+        assert!(!report.contains("99"));
         for (covered, checks, partial) in [
             (false, vec![], true),
             (true, vec![], true),
@@ -1474,11 +1512,10 @@ One concrete finding and one repo-history reminder.
                 c.mark("src/storage.rs", CoverageStatus::Reviewed, "reviewed");
                 c
             });
-            let fallback =
-                fallback_final_report(&review, &published, Some("report formatter failed"));
-            let body = final_review_comment_body(
-                &config, &trigger, "session", &review, &published, &fallback,
-            );
+            let body = final_review_comment_body(&config, &trigger, "session", &review, &published);
+            if covered {
+                assert!(body.contains("文件阶段已审 1 / 1"));
+            }
             assert_eq!(body.contains("**部分完成**"), partial);
             assert!(body.contains(&first.evidence));
             assert!(body.contains(&first.fix));
@@ -1490,7 +1527,7 @@ One concrete finding and one repo-history reminder.
         review
             .unplaced_findings
             .push(unplaced_from_validated(first, "line unavailable".into()));
-        let fallback = fallback_final_report(&review, &published, None);
+        let fallback = render_final_report(&review, &published);
         assert!(fallback.contains("未能定位或完整验证"));
         assert!(!fallback.contains("未发现需要修复"));
     }
@@ -2030,21 +2067,6 @@ One concrete finding and one repo-history reminder.
         update_pr_review_memory(&mut state, &trigger, "s1", Some(&validated), &published);
         let memory = state.pr_review_memory.get("VitaDynamics/Vvbot#7").unwrap();
         assert!(memory.summary_findings.len() >= 2);
-    }
-
-    #[test]
-    fn final_report_sanitizer_keeps_markdown_and_removes_outer_metadata() {
-        let report = sanitize_final_report(
-            "<!-- astrcode-auto-review -->\n我是 whatevertogo 的替身。\nReview session: \
-             `s1`\nHead SHA: `abc`\n# 代码审查\n\n## 发现\n\n- [P1] 有问题\n\n| 声明 | 结论 \
-             |\n|---|---|\n| x | ✅ |",
-        );
-
-        assert!(report.starts_with("# 代码审查"));
-        assert!(report.contains("- [P1] 有问题"));
-        assert!(report.contains("| 声明 | 结论 |"));
-        assert!(!report.contains("Review session"));
-        assert!(!report.contains("Head SHA"));
     }
 
     fn to_hex(bytes: &[u8]) -> String {
