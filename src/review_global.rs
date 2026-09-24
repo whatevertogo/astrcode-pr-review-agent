@@ -30,12 +30,21 @@ result_index 为对应最终 confirmed_findings/advisory_findings/observations �
 JSON 输出时包含 global_review_complete:true 与 candidate_checks；其余字段保持原 JSON 协议。
 若使用标签协议，额外输出 <global_review_complete>true</global_review_complete>，并逐条输出 <candidate_check id="C001" outcome="rejected">具体证据与理由</candidate_check>；保留条目用 result_index="0" 指向对应 kind 的 finding 或 observation 顺序。不遗漏编号，不以“无问题”代替复核。
 global_review_complete 只表明本阶段完成，不扩大文件级覆盖；前片未完整审查的文件仍为未审。
+没有 C 编号候选时，candidate_checks 必须为 []，标签模式不输出任何 candidate_check，禁止 id="none" 等占位项。
+无论是否发现问题，investigation_log 至少保留一条实际核查的源码事实与位置；只有完成声明、不含核查依据的输出不合格。
 "#;
 
 pub(crate) fn validate(output: &ReviewBotOutput, candidates: &[Value]) -> Result<()> {
     anyhow::ensure!(
         output.global_review_complete,
         "global review completion declaration missing"
+    );
+    anyhow::ensure!(
+        output
+            .investigation_log
+            .iter()
+            .any(|note| !note.trim().is_empty()),
+        "global review missing source-backed investigation evidence"
     );
     let expected: BTreeSet<_> = candidates.iter().filter_map(|c| c["id"].as_str()).collect();
     let mut seen = BTreeSet::new();
@@ -76,6 +85,18 @@ pub(crate) fn validate(output: &ReviewBotOutput, candidates: &[Value]) -> Result
         expected.difference(&seen).collect::<Vec<_>>()
     );
     Ok(())
+}
+
+/// Receipt repair must never silently delete a discovery or its supporting facts.
+pub(crate) fn repair_receipt(
+    original: &ReviewBotOutput,
+    repaired: ReviewBotOutput,
+) -> ReviewBotOutput {
+    ReviewBotOutput {
+        global_review_complete: repaired.global_review_complete,
+        candidate_checks: repaired.candidate_checks,
+        ..original.clone()
+    }
 }
 
 /// Orientation is optional at small budgets; one file pass and a final pass are not.

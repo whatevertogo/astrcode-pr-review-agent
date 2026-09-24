@@ -2344,10 +2344,16 @@ async fn parse_or_repair_checked_output(
     candidates: Option<&[Value]>,
 ) -> Result<ReviewBotOutput> {
     let mut latest = initial.to_owned();
+    let original = candidates.and_then(|_| parse_review_bot_output(initial).ok());
     let mut last_error = None;
     let repairs = config.json_repair_attempts.min(1);
     for attempt in 0..=repairs {
-        match parse_review_bot_output(&latest).and_then(|output| {
+        match parse_review_bot_output(&latest).and_then(|mut output| {
+            if attempt > 0 {
+                if let Some(original) = &original {
+                    output = review_global::repair_receipt(original, output);
+                }
+            }
             if let Some(candidates) = candidates { review_global::validate(&output, candidates)?; }
             Ok(output)
         }) {
@@ -2359,7 +2365,7 @@ async fn parse_or_repair_checked_output(
                 }
                 let mut prompt = json_repair_prompt(&latest, last_error.as_ref().unwrap());
                 if let Some(candidates) = candidates {
-                    prompt.push_str(&format!("\n{}\n候选：{}\n只修复遗漏的处置记录及结果引用，保持已核实事实；未解决的前提保留观察。", review_global::CONTRACT, serde_json::to_string(candidates)?));
+                    prompt.push_str(&format!("\n{}\n候选：{}\n只修复 global_review_complete 与 candidate_checks。原始 findings、observations、investigation_log 等正文由程序原样保留；索引必须指向原始正文，不得新增、删除、重排或改写发现来凑齐回执。无法根据现有事实处置的候选不要捏造结论。", review_global::CONTRACT, serde_json::to_string(candidates)?));
                 }
                 latest = submit_prompt_and_wait(
                     run_info,

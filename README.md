@@ -121,6 +121,10 @@ explicit disposition for every prior finding/observation; omitted candidates,
 invalid result references or a missing completion receipt fail validation. A
 single bounded format repair is allowed. Failed global review never publishes
 unreviewed findings as confirmed inline defects.
+Global completion also requires recorded investigation evidence. When the response
+already decodes and only its receipt is invalid, repair may change only the
+completion flag and candidate dispositions; the program preserves all original
+findings, observations and evidence instead of trusting a repair to reproduce them.
 
 `max_review_passes_per_pr` includes the global pass (minimum 2); in coverage-first
 mode it also includes orientation when the budget is at least 3. At budget 8 the

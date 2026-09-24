@@ -689,7 +689,7 @@ One concrete finding and one repo-history reminder.
             ..Default::default()
         };
         let candidates = review_global::candidates(&prior);
-        let raw = json!({"global_review_complete":true,
+        let raw = json!({"global_review_complete":true,"investigation_log":["caller.rs:20 guards the path"],
         "observations":[{"title":"possible race","evidence":"writer.rs:10 uses another lock"}],
         "candidate_checks":[
             {"id":"C001","outcome":"rejected","reason":"caller.rs:20 retries the failed operation"},
@@ -719,23 +719,45 @@ One concrete finding and one repo-history reminder.
             json!({"global_review_complete":true,"candidate_checks":[{"id":"C003","outcome":"rejected","reason":"unknown"}]}),
             json!({"global_review_complete":true,"candidate_checks":raw["candidate_checks"],"observations":[]}),
         ] {
+            let mut invalid = invalid;
+            invalid["investigation_log"] = raw["investigation_log"].clone();
             assert!(review_global::validate(
                 &parse_review_bot_output(&invalid.to_string()).unwrap(),
                 &candidates
             )
             .is_err());
         }
-        let tagged = parse_review_bot_output("<global_review_complete>true</global_review_complete><candidate_check id=\"C001\" outcome=\"rejected\">caller.rs:20 guards the path</candidate_check><candidate_check id=\"C002\" outcome=\"rejected\">writer.rs:10 serializes both writers</candidate_check>").unwrap();
+        let tagged = parse_review_bot_output("<global_review_complete>true</global_review_complete><investigation_log>caller.rs:20 guards the path</investigation_log><candidate_check id=\"C001\" outcome=\"rejected\">caller.rs:20 guards the path</candidate_check><candidate_check id=\"C002\" outcome=\"rejected\">writer.rs:10 serializes both writers</candidate_check>").unwrap();
         review_global::validate(&tagged, &candidates).unwrap();
         assert!(review_global::validate(&ReviewBotOutput::default(), &[]).is_err());
         review_global::validate(
             &ReviewBotOutput {
                 global_review_complete: true,
+                investigation_log: vec!["caller.rs:20 checked against base".into()],
                 ..Default::default()
             },
             &[],
         )
         .unwrap();
+        let repaired = review_global::repair_receipt(
+            &output,
+            ReviewBotOutput {
+                global_review_complete: true,
+                candidate_checks: output.candidate_checks.clone(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(repaired.observations.len(), output.observations.len());
+        assert_eq!(repaired.investigation_log, output.investigation_log);
+        review_global::validate(&repaired, &candidates).unwrap();
+        assert!(review_global::validate(
+            &ReviewBotOutput {
+                global_review_complete: true,
+                ..Default::default()
+            },
+            &[]
+        )
+        .is_err());
     }
 
     #[tokio::test]
