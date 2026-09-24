@@ -1,6 +1,14 @@
 use super::*;
 
-pub(super) const PROMPT_VERSION: &str = include_str!("../../prompts/quality-review.md");
+pub(super) const PROMPT_VERSION: &str = concat!(
+    include_str!("../../prompts/quality-review.md"),
+    "\n",
+    include_str!("../../prompts/review-method.md"),
+    "\n",
+    include_str!("../../prompts/finding-evidence.md"),
+    "\n",
+    include_str!("../../prompts/comment-style.md"),
+);
 pub(super) const EVALUATION_RULES:&str="评测约束：只审查冻结的 base/head 和工作树。不得读取该 PR 的评论、review、自动审查报告、当前描述或比冻结 head 更新的代码，这些可能泄露后续答案。使用下方冻结描述和已提供的检查记录。其他必要调查限于固定版本的只读代码证据。";
 
 pub(super) async fn analyze(

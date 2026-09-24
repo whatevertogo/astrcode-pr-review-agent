@@ -100,6 +100,36 @@ summary with their evidence. `max_inline_comments` limits inline comments (zero
 means no inline comments in this pipeline). Existing explicit pipeline choices
 are not migrated automatically.
 
+## Review prompts and comment presentation
+
+Both pipelines compose the same small prompt blocks at compile time:
+
+| Block | Responsibility |
+|---|---|
+| `review-method.md` | Behavior/causality, permissions, lifecycle/failure paths, and contracts/consumers; investigate only applicable questions, with no findings quota |
+| `finding-evidence.md` | Trigger, introduced change, evidence, impact, counterexamples and a concrete action; distinguish absent evidence from proven absence |
+| `comment-style.md` | Concise Chinese fields with visible conditions, impact, code evidence and a minimal fix direction |
+| Stage and protocol files | Define each pass's task and retain the existing tagged-Markdown or JSON wire format |
+
+Changing a shared block changes the composed prompt included in the review input
+identity, so results from the old prompt are not reused by `quality_first`.
+The number of review passes, model selection and publication thresholds are unchanged.
+
+Inline comments show the issue, impact, evidence and suggested action directly;
+only supplementary context is folded. Unconfirmed advice is visibly marked.
+The final-report prompt avoids mandatory merge verdicts and repeated sections.
+The fallback report preserves saved evidence and missing-validation warnings;
+publication receipts identify which findings actually became inline comments.
+Session/trigger metadata is available in a fold below the result.
+
+Re-render a saved result without running a model or contacting GitHub:
+
+```bash
+cargo run --example render_review -- path/to/result.json > preview.md
+```
+
+This changes presentation only; it does not repair or revalidate historical findings.
+
 ## Reliable comment receipt
 
 Only open PR conversation comments are eligible. Every entry point checks the
