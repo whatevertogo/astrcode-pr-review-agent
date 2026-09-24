@@ -263,3 +263,65 @@ pub(crate) fn conclusion(review: &ValidatedReview) -> String {
         "在已审范围内未发现需要修复的高置信度问题。\n".into()
     }
 }
+
+/// Keep the full report on disk before replacing oversized GitHub content with
+/// complete index entries. Never slice a Markdown block or a UTF-8 character.
+pub(crate) fn publication_content(
+    full: &str,
+    review: &ValidatedReview,
+    review_url: Option<&str>,
+    archive: &Path,
+    budget: usize,
+) -> Result<String> {
+    if full.len() <= budget {
+        return Ok(full.to_owned());
+    }
+    anyhow::ensure!(
+        budget >= 1024,
+        "insufficient summary space for publication metadata"
+    );
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(archive, full).context("archive full review before compact publication")?;
+    let mut body = conclusion(review);
+    body.push_str("\n报告超过 GitHub 正文预算，以下仅展示问题索引；完整证据、验证与剩余风险已保存在本次运行记录中。\n\n");
+    let mut omitted = 0usize;
+    let mut append = |entry: String| {
+        if body.len() + entry.len() + 256 <= budget {
+            body.push_str(&entry);
+        } else {
+            omitted += 1;
+        }
+    };
+    if let Some(url) = review_url {
+        append(format!("[查看已发布行评]({url})\n\n"));
+    }
+    for finding in review
+        .inline_findings
+        .iter()
+        .chain(&review.summary_findings)
+    {
+        append(finding_index(finding));
+    }
+    for observation in &review.observations {
+        append(observation_index(observation));
+    }
+    for finding in &review.unplaced_findings {
+        append(format!(
+            "- **[{}] {}** · 未能定位或完整验证\n",
+            text(&finding.priority),
+            text(&finding.title)
+        ));
+    }
+    if omitted > 0 {
+        body.push_str(&format!(
+            "\n另有 {omitted} 项索引因长度限制未展示，保留在完整记录中。\n"
+        ));
+    }
+    anyhow::ensure!(
+        body.len() <= budget,
+        "compact report exceeds summary budget"
+    );
+    Ok(body)
+}

@@ -353,3 +353,9 @@ Coverage-first cache identity uses the refreshed remote base commit. Prior
 schema results at the same repository, PR, base/head and model may contribute
 candidate hints for a fresh review under current rules, never cached completion
 or coverage across a schema/prompt change.
+
+Oversized GitHub overviews retain the complete report in the run directory and
+publish a bounded index of whole findings instead. Evidence/code blocks are
+never cut in half; omitted entries are disclosed, and the saved report preserves
+the original evidence, checks and residual risks. Root-level extensionless files
+use the same positive `path:line` receipt syntax as all other source paths.

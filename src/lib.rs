@@ -772,6 +772,19 @@ One concrete finding and one repo-history reminder.
             &[],
         )
         .unwrap();
+        for path in [
+            "BUILD",
+            "Gemfile",
+            "WORKSPACE",
+            "Dockerfile",
+            "Makefile",
+            "src/test.rs",
+        ] {
+            let mut located = output.clone();
+            located.investigation_log = vec![format!("{path}:10 verified target")];
+            located.candidate_checks[0].reason = format!("{path}:10 verifies the caller guard");
+            review_global::validate(&located, &candidates).unwrap();
+        }
         let repaired = review_global::repair_receipt(
             &output,
             ReviewBotOutput {
@@ -1554,6 +1567,36 @@ One concrete finding and one repo-history reminder.
             assert!(!body.contains("## 合并评估"));
             assert!(body.find("第一个问题").unwrap() < body.find("审查会话").unwrap());
         }
+        let archive_root = tempfile::tempdir().unwrap();
+        let archive = archive_root.path().join("full.md");
+        for (evidence, title) in [
+            ("中文".repeat(30_000), "正常标题".into()),
+            ("```rust\ncode\n```".repeat(5000), "长标题".repeat(30_000)),
+        ] {
+            let mut large = review.clone();
+            large.inline_findings[0].evidence = evidence;
+            large.inline_findings[0].title = title;
+            let full = final_review_comment_body(&config, &trigger, "session", &large, &published);
+            assert!(full.len() > 60_000);
+            let compact = review_comments::publication_content(
+                &full,
+                &large,
+                published.inline_review_url.as_deref(),
+                &archive,
+                55_000,
+            )
+            .unwrap();
+            assert!(compact.len() <= 55_000);
+            assert!(compact.contains("完整证据"));
+            assert!(!compact.contains("<details>"));
+            assert!(!compact.contains("```"));
+            assert!(compact.contains("第二个问题"));
+            assert_eq!(fs::read_to_string(&archive).unwrap(), full);
+        }
+        assert_eq!(
+            review_comments::publication_content("short", &review, None, &archive, 55_000).unwrap(),
+            "short"
+        );
         review.inline_findings.clear();
         review
             .unplaced_findings

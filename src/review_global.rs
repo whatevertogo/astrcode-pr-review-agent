@@ -135,11 +135,7 @@ fn has_source_location(text: &str) -> bool {
             return false;
         };
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        (path.contains('.')
-            || path.contains('/')
-            || ["Dockerfile", "Makefile", "Justfile"]
-                .iter()
-                .any(|name| path.trim_matches(['`', '(', '[']).ends_with(name)))
+        !path.trim_matches(['`', '(', '[']).is_empty()
             && digits.parse::<usize>().is_ok_and(|line| line > 0)
     })
 }

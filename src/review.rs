@@ -2911,7 +2911,19 @@ fn post_final_structured_report(
     validated: &ValidatedReview,
     published: &mut PublishedReview,
 ) -> Result<()> {
-    let body = final_review_comment_body(config, trigger, session_id, validated, published);
+    let full = final_review_comment_body(config, trigger, session_id, validated, published);
+    let body = if full.len() > 60_000 {
+        let directory = match &validated.debug_dir {
+            Some(directory) => directory.clone(),
+            None => create_debug_run_dir(config, trigger)?,
+        };
+        let header = final_review_header(config, trigger, validated);
+        let content = review_comments::publication_content(&full, validated,
+            published.inline_review_url.as_deref(), &directory.join("full-final-report.md"),
+            60_000usize.saturating_sub(header.len()))?;
+        format!("{header}{content}")
+    } else { full };
+    anyhow::ensure!(body.len() <= 60_000, "review summary exceeds GitHub budget");
     write_debug_artifact(
         validated.debug_dir.as_deref(),
         "final-comment-body.md",
@@ -2930,17 +2942,7 @@ fn final_review_comment_body(
     validated: &ValidatedReview,
     published: &PublishedReview,
 ) -> String {
-    let status = if review_comments::is_partial(validated) {
-        "部分完成"
-    } else {
-        "审查完成"
-    };
-    let sha = &trigger.pr.head_ref_oid;
-    let mut body = format!(
-        "{}\n{AGENT_LINE}\n\n**{status}** · 审查版本 `{}`\n\n",
-        config.comment_marker,
-        &sha[..sha.len().min(12)],
-    );
+    let mut body = final_review_header(config, trigger, validated);
     body.push_str(&render_final_report(validated, published));
     let mut metadata = review_comments::metadata(trigger, session_id);
     if let Some(id) = published.inline_review_id {
@@ -2948,6 +2950,20 @@ fn final_review_comment_body(
     }
     review_comments::fold(&mut body, "执行信息", &metadata);
     body
+}
+
+fn final_review_header(config: &Config, trigger: &ReviewTrigger, validated: &ValidatedReview) -> String {
+    let status = if review_comments::is_partial(validated) {
+        "部分完成"
+    } else {
+        "审查完成"
+    };
+    let sha = &trigger.pr.head_ref_oid;
+    format!(
+        "{}\n{AGENT_LINE}\n\n**{status}** · 审查版本 `{}`\n\n",
+        config.comment_marker,
+        &sha[..sha.len().min(12)],
+    )
 }
 
 fn render_final_report(
