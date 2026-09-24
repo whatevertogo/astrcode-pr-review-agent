@@ -179,14 +179,16 @@ pub(crate) fn metadata(trigger: &ReviewTrigger, session_id: &str) -> String {
 }
 
 pub(crate) fn is_partial(review: &ValidatedReview) -> bool {
-    review.coverage.as_ref().is_none_or(|coverage| {
-        coverage.entries.values().any(|entry| {
-            !matches!(
-                entry.status,
-                CoverageStatus::Reviewed | CoverageStatus::SkippedGenerated
-            )
+    !review.global_review_complete
+        || review.coverage.as_ref().is_none_or(|coverage| {
+            coverage.entries.values().any(|entry| {
+                !matches!(
+                    entry.status,
+                    CoverageStatus::Reviewed | CoverageStatus::SkippedGenerated
+                )
+            })
         })
-    }) || review.verification.is_empty()
+        || review.verification.is_empty()
         || review
             .verification
             .iter()

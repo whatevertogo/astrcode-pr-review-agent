@@ -14,7 +14,7 @@ mod tests;
 
 use context::ReviewSnapshot;
 use usage::StageReceipt;
-const RESULT_SCHEMA_VERSION: u32 = 3;
+const RESULT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRunResult {
@@ -134,7 +134,7 @@ fn read<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
         .with_context(|| format!("read {}", path.display()))
 }
 
-fn model_identity(run_info: &RunInfo) -> Result<Value> {
+pub(super) fn model_identity(run_info: &RunInfo) -> Result<Value> {
     let current = curl_json(
         "GET",
         &format!("http://127.0.0.1:{}/api/models/current", run_info.port),
@@ -150,7 +150,7 @@ fn model_identity(run_info: &RunInfo) -> Result<Value> {
 
 fn input_key(snapshot: &ReviewSnapshot, config: &Config, model: &Value) -> Result<String> {
     let mut input = json!({
-        "version":1,"snapshot":snapshot,"config":config,"model":model,
+        "version":2,"global_contract":review_global::CONTRACT,"snapshot":snapshot,"config":config,"model":model,
         "prompts":pipeline::PROMPT_VERSION,"protocol":PR_REVIEW_BOT_PROMPT,
         "file":FILE_REVIEW_PROMPT,"global":GLOBAL_REVIEW_PROMPT,
         "orientation":ORIENTATION_REVIEW_PROMPT,"few_shots":PR_REVIEW_FEW_SHOTS_PROMPT,

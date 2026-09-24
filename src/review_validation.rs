@@ -77,6 +77,8 @@ fn validate_review_output(
     }
 
     ValidatedReview {
+        global_review_complete: output.global_review_complete,
+        candidate_checks: output.candidate_checks.clone(),
         inline_findings: valid,
         summary_findings,
         unplaced_findings: unplaced,

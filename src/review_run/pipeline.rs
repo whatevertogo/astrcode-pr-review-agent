@@ -66,7 +66,8 @@ pub(super) async fn analyze(
     } else {
         let (shards, mut incomplete) = context::shards(config, &snapshot.context);
         let mut outputs = Vec::new();
-        let maximum = config.max_review_passes_per_pr.max(1);
+        let maximum = config.max_review_passes_per_pr;
+        review_global::file_budget(maximum)?;
         let file_limit = maximum.saturating_sub(1);
         for shard in shards.iter().take(file_limit) {
             let instructions = shard
@@ -103,6 +104,7 @@ pub(super) async fn analyze(
                 &label,
                 &prompt,
                 &mut stages,
+                None,
             )
             .await
             {
@@ -136,6 +138,7 @@ pub(super) async fn analyze(
                             &format!("{label}-coverage-format"),
                             &prompt,
                             &mut stages,
+                            None,
                         )
                         .await
                         {
@@ -180,10 +183,9 @@ pub(super) async fn analyze(
             // do not lose problems found only by the previous global pass.
             output = merge_review_outputs(&[output, previous]);
         }
-        let candidates =
-            !output.confirmed_findings.is_empty() || !output.advisory_findings.is_empty();
-        let mut adjudicated = !candidates;
-        if shards.len() > 1 || candidates {
+        let candidate_list = review_global::candidates(&output);
+        let mut adjudicated = false;
+        {
             let instructions = snapshot
                 .instructions
                 .values()
@@ -200,44 +202,46 @@ pub(super) async fn analyze(
             if !snapshot.request.is_empty() {
                 prompt.push_str(&format!("\n本次审查要求：{}", snapshot.request));
             }
-            if maximum > 1 {
-                match pass(
-                    options,
-                    config,
-                    host,
-                    &model,
-                    &worktree,
-                    &input_key,
-                    "global",
-                    &prompt,
-                    &mut stages,
-                )
-                .await
-                {
-                    Ok((final_output, _)) => {
-                        output = final_output;
-                        adjudicated = true;
-                    }
-                    Err(error) => {
-                        retryable_failures = true;
-                        if fatal(&error) {
-                            return Err(error);
-                        }
-                        output
-                            .residual_risk
-                            .push(format!("全局复核失败：{error:#}"));
-                        incomplete.extend(
-                            snapshot
-                                .context
-                                .files
-                                .iter()
-                                .filter(|f| f.kind != ReviewFileKind::Generated)
-                                .map(|f| f.path.clone()),
-                        );
-                    }
+            prompt.push_str(&format!(
+                "\n{}\n必须逐条处置的候选：{}",
+                review_global::CONTRACT,
+                serde_json::to_string(&candidate_list)?
+            ));
+            match pass(
+                options,
+                config,
+                host,
+                &model,
+                &worktree,
+                &input_key,
+                "global",
+                &prompt,
+                &mut stages,
+                Some(&candidate_list),
+            )
+            .await
+            {
+                Ok((final_output, _)) => {
+                    output = final_output;
+                    adjudicated = true;
                 }
-            } else {
-                incomplete.extend(snapshot.context.files.iter().map(|f| f.path.clone()));
+                Err(error) => {
+                    retryable_failures = true;
+                    if fatal(&error) {
+                        return Err(error);
+                    }
+                    output
+                        .residual_risk
+                        .push(format!("全局复核失败：{error:#}"));
+                    incomplete.extend(
+                        snapshot
+                            .context
+                            .files
+                            .iter()
+                            .filter(|f| f.kind != ReviewFileKind::Generated)
+                            .map(|f| f.path.clone()),
+                    );
+                }
             }
         }
         if !adjudicated {
@@ -274,17 +278,20 @@ pub(super) async fn analyze(
         review.coverage = Some(coverage);
         review
     };
-    let status = if review.coverage.as_ref().is_some_and(|coverage| {
-        coverage.entries.values().any(|entry| {
-            !matches!(
-                entry.status,
-                CoverageStatus::Reviewed | CoverageStatus::SkippedGenerated
-            )
+    let status = if !review.global_review_complete
+        || retryable_failures
+        || review.coverage.as_ref().is_some_and(|coverage| {
+            coverage.entries.values().any(|entry| {
+                !matches!(
+                    entry.status,
+                    CoverageStatus::Reviewed | CoverageStatus::SkippedGenerated
+                )
+            })
         })
-    }) || review
-        .verification
-        .iter()
-        .any(|check| check.status.as_deref() != Some("passed"))
+        || review
+            .verification
+            .iter()
+            .any(|check| check.status.as_deref() != Some("passed"))
     {
         "partial"
     } else {
@@ -333,6 +340,7 @@ async fn pass(
     label: &str,
     prompt: &str,
     stages: &mut Vec<StageReceipt>,
+    candidates: Option<&[Value]>,
 ) -> Result<(ReviewBotOutput, usize)> {
     anyhow::ensure!(
         &model_identity(host)? == model,
@@ -346,8 +354,12 @@ async fn pass(
         .find(|(_, stage)| stage.input_key == key && stage.status == "complete")
     {
         if let Some(output) = &previous.output {
-            previous.run_key = run_key.to_owned();
-            return Ok((output.clone(), index));
+            if candidates.is_none_or(|items| review_global::validate(output, items).is_ok()) {
+                previous.run_key = run_key.to_owned();
+                return Ok((output.clone(), index));
+            }
+            previous.status = "failed".into();
+            previous.error = Some("cached global review failed candidate accounting".into());
         }
     }
     // Only the latest attempt owns the label's saved response. Revalidate its
@@ -358,8 +370,10 @@ async fn pass(
         .rev()
         .find(|(_, stage)| stage.label == label)
     {
-        if let Some(output) =
-            context::recover_format_response(&options.output, previous, run_key, prompt)
+        if let Some(output) = candidates
+            .is_none()
+            .then(|| context::recover_format_response(&options.output, previous, run_key, prompt))
+            .flatten()
         {
             let session = previous.session_id.clone();
             save(&options.output.join("stages.json"), stages)?;
@@ -416,7 +430,8 @@ async fn pass(
             options.output.join(format!("{label}-response.txt")),
             &response,
         )?;
-        let output = parse_or_repair_review_output(config, host, &session, &response).await?;
+        let output =
+            parse_or_repair_checked_output(config, host, &session, &response, candidates).await?;
         anyhow::ensure!(
             &model_identity(host)? == model,
             "model configuration changed during review"

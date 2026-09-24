@@ -112,8 +112,27 @@ Both pipelines compose the same small prompt blocks at compile time:
 | Stage and protocol files | Define each pass's task and retain the existing tagged-Markdown or JSON wire format |
 
 Changing a shared block changes the composed prompt included in the review input
-identity, so results from the old prompt are not reused by `quality_first`.
-The number of review passes, model selection and publication thresholds are unchanged.
+identity, so results from the old prompt are not reused. Model selection and
+publication thresholds stay independent of review depth.
+
+Both review pipelines require a final global pass, including single-shard and
+zero-candidate reviews. The global pass returns the complete final result and an
+explicit disposition for every prior finding/observation; omitted candidates,
+invalid result references or a missing completion receipt fail validation. A
+single bounded format repair is allowed. Failed global review never publishes
+unreviewed findings as confirmed inline defects.
+
+`max_review_passes_per_pr` includes the global pass (minimum 2); in coverage-first
+mode it also includes orientation when the budget is at least 3. At budget 8 the
+plan is orientation + up to 6 file passes + global, even when all 6 file passes
+are used. Larger PRs need a larger budget; exhaustion remains explicitly partial.
+Files start pending and only a successful file-stage declaration earns reviewed
+coverage. Orientation/global reads never silently upgrade that coverage.
+
+Coverage-first stage caches bind base/head, configuration, model identity, prompt
+and input context. Old unbound records remain on disk but are not reused. Global
+candidate dispositions and file coverage are persisted and the program adds a
+review receipt to the GitHub overview.
 
 Inline comments show the issue, impact, evidence and suggested action directly;
 only supplementary context is folded. Unconfirmed advice is visibly marked.

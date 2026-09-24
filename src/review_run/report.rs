@@ -13,13 +13,14 @@ use review_comments::fold;
 pub(super) fn render(result: &ReviewRunResult) -> String {
     let mut body = format!(
         "**{}** · 审查版本 `{}`\n\n",
-        if result.status == "complete" {
+        if result.status == "complete" && result.review.global_review_complete {
             "审查完成"
         } else {
             "部分完成"
         },
         &result.head_sha[..result.head_sha.len().min(12)]
     );
+    body.push_str(&review_global::summary(&result.review));
     if let Some(coverage) = &result.review.coverage {
         body.push_str(&format!(
             "文件审查：{} / {}。验证状态：{}。\n\n",

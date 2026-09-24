@@ -187,6 +187,10 @@ pub(super) fn publish(
     result: &mut ReviewRunResult,
     output: &Path,
 ) -> Result<()> {
+    anyhow::ensure!(
+        result.review.global_review_complete || result.review.inline_findings.is_empty(),
+        "mandatory global review has not completed; refusing inline publication"
+    );
     let _lock = publication_lock(snapshot, "inline")?;
     context::assert_current(snapshot)?;
     let owner = viewer()?;

@@ -28,6 +28,7 @@ include!("status.rs");
 
 mod mention;
 mod review_comments;
+mod review_global;
 pub use mention::{discover_once, enqueue_cli, mention_status_cli};
 
 mod review_run;
@@ -641,6 +642,131 @@ One concrete finding and one repo-history reminder.
     }
 
     #[test]
+    fn global_review_budget_coverage_and_candidate_accounting() {
+        for maximum in [0, 1, 2, 3, 8, 16, 32] {
+            let plan = review_global::file_budget(maximum);
+            if maximum < 2 {
+                assert!(plan.is_err());
+                continue;
+            }
+            let (orientation, files) = plan.unwrap();
+            assert!(files >= 1);
+            assert_eq!(usize::from(orientation) + files + 1, maximum);
+            if maximum == 8 {
+                assert_eq!(files, 6);
+            }
+        }
+        let mut context = test_review_context();
+        let mut extra = context.files[0].clone();
+        extra.path = "src/not-reached.rs".into();
+        context.files.push(extra);
+        let mut coverage = initial_coverage(&context);
+        assert_eq!(coverage.reviewed_count(), 0);
+        coverage.mark(
+            "src/storage.rs",
+            CoverageStatus::Reviewed,
+            "successful file stage",
+        );
+        coverage.mark(
+            "src/not-reached.rs",
+            CoverageStatus::Failed,
+            "budget exhausted",
+        );
+        assert_eq!(
+            coverage.entries["src/not-reached.rs"].status,
+            CoverageStatus::Failed
+        );
+        assert!(coverage_residual_risk(&coverage)
+            .iter()
+            .any(|r| r.contains("budget exhausted")));
+
+        let prior = ReviewBotOutput {
+            confirmed_findings: vec![review_finding("P1", "candidate", 10)],
+            observations: vec![ReviewObservation {
+                title: Some("possible race".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let candidates = review_global::candidates(&prior);
+        let raw = json!({"global_review_complete":true,
+        "observations":[{"title":"possible race","evidence":"writer.rs:10 uses another lock"}],
+        "candidate_checks":[
+            {"id":"C001","outcome":"rejected","reason":"caller.rs:20 retries the failed operation"},
+            {"id":"C002","outcome":"observation","result_index":0,"reason":"writer.rs:10; interleaving remains unverified"}
+        ]});
+        let output = parse_review_bot_output(&raw.to_string()).unwrap();
+        review_global::validate(&output, &candidates).unwrap();
+        assert!(output.confirmed_findings.is_empty());
+        assert_eq!(output.observations.len(), 1);
+        let mut validated = validate_review_output(&Config::default(), &output, &context);
+        assert!(validated.global_review_complete);
+        assert!(review_global::summary(&validated).contains("保留 0，排除 1，待核实 1"));
+        validated.global_review_complete = false;
+        assert!(publish_structured_review(
+            &Config::default(),
+            &auto_trigger("owner/repo", 1),
+            "fixture",
+            &validated
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mandatory global review"));
+        for invalid in [
+            json!({"global_review_complete":false,"candidate_checks":raw["candidate_checks"],"observations":raw["observations"]}),
+            json!({"global_review_complete":true,"candidate_checks":[raw["candidate_checks"][0]]}),
+            json!({"global_review_complete":true,"candidate_checks":[raw["candidate_checks"][0],raw["candidate_checks"][0]]}),
+            json!({"global_review_complete":true,"candidate_checks":[{"id":"C003","outcome":"rejected","reason":"unknown"}]}),
+            json!({"global_review_complete":true,"candidate_checks":raw["candidate_checks"],"observations":[]}),
+        ] {
+            assert!(review_global::validate(
+                &parse_review_bot_output(&invalid.to_string()).unwrap(),
+                &candidates
+            )
+            .is_err());
+        }
+        let tagged = parse_review_bot_output("<global_review_complete>true</global_review_complete><candidate_check id=\"C001\" outcome=\"rejected\">caller.rs:20 guards the path</candidate_check><candidate_check id=\"C002\" outcome=\"rejected\">writer.rs:10 serializes both writers</candidate_check>").unwrap();
+        review_global::validate(&tagged, &candidates).unwrap();
+        assert!(review_global::validate(&ReviewBotOutput::default(), &[]).is_err());
+        review_global::validate(
+            &ReviewBotOutput {
+                global_review_complete: true,
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stage_cache_requires_identical_input_and_preserves_legacy_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        RUN_DATA_DIR
+            .scope(tmp.path().to_path_buf(), async {
+                let trigger = auto_trigger("owner/repo", 1);
+                let path = staged_review_path(&trigger).unwrap();
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let legacy = json!({"label":"global-pass","created_at":1,"output":{}}).to_string();
+                fs::write(&path, format!("{legacy}\n")).unwrap();
+                let mut run =
+                    StagedReviewRun::load(&trigger, "base/head/model/config-A".into()).unwrap();
+                assert!(run.output("global-pass", "prompt").is_none());
+                run.append("file-pass-001", "prompt", &ReviewBotOutput::default())
+                    .unwrap();
+                let restored =
+                    StagedReviewRun::load(&trigger, "base/head/model/config-A".into()).unwrap();
+                assert!(restored.output("file-pass-001", "prompt").is_some());
+                assert!(restored.output("file-pass-001", "changed prompt").is_none());
+                assert!(restored.output("global-pass", "prompt").is_none());
+                let changed =
+                    StagedReviewRun::load(&trigger, "base/head/model/config-B".into()).unwrap();
+                assert!(changed.output("file-pass-001", "prompt").is_none());
+                assert!(fs::read_to_string(path).unwrap().starts_with(&legacy));
+            })
+            .await;
+    }
+
+    #[test]
     fn shard_planner_covers_reviewable_files() {
         let config = Config {
             max_files_per_shard: 1,
@@ -746,6 +872,8 @@ One concrete finding and one repo-history reminder.
         let trigger = auto_trigger("VitaDynamics/Vvbot", 621);
         let finding = validated_finding("P1", "Persist storage before returning", 10);
         let validated = ValidatedReview {
+            global_review_complete: false,
+            candidate_checks: Vec::new(),
             inline_findings: vec![finding.clone()],
             summary_findings: Vec::new(),
             unplaced_findings: Vec::new(),
@@ -1263,6 +1391,8 @@ One concrete finding and one repo-history reminder.
             )],
         };
         let mut review = ValidatedReview {
+            global_review_complete: true,
+            candidate_checks: Vec::new(),
             inline_findings: vec![first.clone(), second.clone()],
             summary_findings: Vec::new(),
             unplaced_findings: Vec::new(),
@@ -1778,6 +1908,8 @@ One concrete finding and one repo-history reminder.
     fn pr_memory_suppresses_repeated_posted_findings() {
         let finding = validated_finding("P1", "Persist storage before returning", 10);
         let mut validated = ValidatedReview {
+            global_review_complete: false,
+            candidate_checks: Vec::new(),
             inline_findings: vec![finding.clone()],
             summary_findings: Vec::new(),
             unplaced_findings: Vec::new(),
@@ -1813,6 +1945,8 @@ One concrete finding and one repo-history reminder.
     fn pr_review_memory_records_summary_findings_and_observations() {
         let trigger = auto_trigger("VitaDynamics/Vvbot", 7);
         let mut validated = ValidatedReview {
+            global_review_complete: false,
+            candidate_checks: Vec::new(),
             inline_findings: Vec::new(),
             summary_findings: vec![validated_finding("P3", "Add a regression test", 10)],
             unplaced_findings: Vec::new(),
