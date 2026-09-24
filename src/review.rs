@@ -424,7 +424,7 @@ async fn run_coverage_first_review(
         "deterministic-checks.json",
         &serde_json::to_string_pretty(&deterministic_checks).unwrap_or_default(),
     );
-    let base_sha = run_command("git", &["merge-base", "HEAD", &trigger.pr.base_ref_name], Some(worktree))?;
+    let base_sha = run_command("git", &["rev-parse", &format!("refs/remotes/origin/{}", trigger.pr.base_ref_name)], Some(worktree))?;
     let identity = json!({"version":2,"head":trigger.pr.head_ref_oid,"base":base_sha.trim(),
         "config":config,"model":review_run::model_identity(run_info)?,"context":context.text}).to_string();
     let mut staging = match StagedReviewRun::load(trigger, identity) {
@@ -575,7 +575,7 @@ async fn run_coverage_first_review(
             context,
             deterministic_checks: &deterministic_checks,
         };
-        let prompt = global_review_prompt(&prompt_context, &coverage, &outputs);
+        let prompt = global_review_prompt(&prompt_context, &coverage, &outputs)?;
         match submit_review_pass(
             config,
             run_info,
@@ -1037,8 +1037,11 @@ fn global_review_prompt(
     prompt: &PassPromptContext<'_>,
     coverage: &ReviewCoverage,
     outputs: &[ReviewBotOutput],
-) -> String {
-    format!(
+) -> Result<String> {
+    let candidates = review_global::candidates(&merge_review_outputs(outputs));
+    let notes = outputs.iter().map(|output| json!({"facts":output.investigation_log,"risks":output.residual_risk})).collect::<Vec<_>>();
+    let payload = review_global::prompt_context(&candidates, &json!(notes), &agent_dir()?.join("global-context"))?;
+    Ok(format!(
         r#"{AGENT_LINE}
 
 你正在执行 {repo} PR #{pr_number} 的全局风险审查阶段。所有自然语言输出必须使用简体中文。
@@ -1084,11 +1087,6 @@ fn global_review_prompt(
 {coverage}
 ```
 
-文件审查阶段输出（保留事实供交叉核对）：
-```json
-{outputs}
-```
-
 {contract}
 
 必须逐条处置的候选：
@@ -1111,7 +1109,7 @@ fn global_review_prompt(
         pr_number = prompt.trigger.pr.number,
         instructions = GLOBAL_REVIEW_PROMPT.trim(),
         contract = review_global::CONTRACT,
-        candidates = serde_json::to_string_pretty(&review_global::candidates(&merge_review_outputs(outputs))).unwrap_or_default(),
+        candidates = payload,
         protocol = PR_REVIEW_BOT_PROMPT.trim(),
         few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         repo_instructions = instruction_context_for_paths(
@@ -1129,14 +1127,13 @@ fn global_review_prompt(
         worktree = prompt.worktree.display(),
         sha = prompt.trigger.pr.head_ref_oid,
         coverage = coverage.summary_lines(),
-        outputs = serde_json::to_string_pretty(outputs).unwrap_or_else(|_| "[]".into()),
         memory = if prompt.memory.trim().is_empty() {
             "这个 PR 暂无既有记忆。"
         } else {
             prompt.memory
         },
         context = short_context_for_global_pass(prompt.context),
-    )
+    ))
 }
 
 fn short_context_for_global_pass(context: &ReviewContext) -> String {

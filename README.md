@@ -343,3 +343,13 @@ cargo check
 ```
 
 The crate depends on `astrcode-extension-sdk` from the Astrcodey repository.
+
+Global review payloads up to 24 KB are embedded once. Larger payloads are saved
+in an immutable file named by their SHA-256 digest, and the model receives its
+path and candidate count for chunked reads; every candidate still requires a
+disposition. Receipts must contain positive `path:line` source locations, which
+validates their structure but does not prove the model's semantic conclusions.
+Coverage-first cache identity uses the refreshed remote base commit. Prior
+schema results at the same repository, PR, base/head and model may contribute
+candidate hints for a fresh review under current rules, never cached completion
+or coverage across a schema/prompt change.

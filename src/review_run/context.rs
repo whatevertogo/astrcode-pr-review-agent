@@ -363,15 +363,8 @@ pub(super) fn recover_format_response(
 }
 
 pub(super) fn adjudication_context(output: &ReviewBotOutput, shards: &[ReviewBotOutput]) -> Value {
-    let mut seen = BTreeSet::new();
-    let observations: Vec<_> = output
-        .observations
-        .iter()
-        .filter(|note| seen.insert(json!(note).to_string()))
-        .collect();
     let risks: BTreeSet<_> = output.residual_risk.iter().collect();
-    json!({"confirmed_findings":output.confirmed_findings,"advisory_findings":output.advisory_findings,
-        "observations":observations,"residual_risk":risks,
+    json!({"residual_risk":risks,
         "contracts_to_verify":prior_conclusions(shards)["contracts"]})
 }
 

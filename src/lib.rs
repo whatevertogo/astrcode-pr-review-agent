@@ -731,6 +731,37 @@ One concrete finding and one repo-history reminder.
         }
         let tagged = parse_review_bot_output("<global_review_complete>true</global_review_complete><investigation_log>caller.rs:20 guards the path</investigation_log><candidate_check id=\"C001\" outcome=\"rejected\">caller.rs:20 guards the path</candidate_check><candidate_check id=\"C002\" outcome=\"rejected\">writer.rs:10 serializes both writers</candidate_check>").unwrap();
         review_global::validate(&tagged, &candidates).unwrap();
+
+        let retained = parse_review_bot_output("<global_review_complete>true</global_review_complete><investigation_log>caller.rs:20 verified</investigation_log><finding kind=\"confirmed\" priority=\"P2\" title=\"retained\">Issue: actual issue</finding><candidate_check id=\"C001\" outcome=\"confirmed\" result_index=\"0\">caller.rs:20 reaches failure</candidate_check><candidate_check id=\"C002\" outcome=\"rejected\">writer.rs:10 serializes writers</candidate_check>").unwrap();
+        assert_eq!(retained.candidate_checks[0].result_index, Some(0));
+        review_global::validate(&retained, &candidates).unwrap();
+        for placeholder in ["done", "reviewed", "file.rs:0", "file.rs:unknown"] {
+            let mut invalid = output.clone();
+            invalid.investigation_log = vec![placeholder.into()];
+            assert!(review_global::validate(&invalid, &candidates).is_err());
+            let mut invalid = output.clone();
+            invalid.candidate_checks[0].reason = placeholder.into();
+            assert!(review_global::validate(&invalid, &candidates).is_err());
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for size in [0, 100, 30_000] {
+            let notes = json!({"fact":"中".repeat(size)});
+            let prompt =
+                review_global::prompt_context(&candidates, &notes, directory.path()).unwrap();
+            assert!(prompt.len() <= 24_000);
+            let envelope: Value = serde_json::from_str(&prompt).unwrap();
+            let saved = if let Some(path) = envelope["context_file"].as_str() {
+                serde_json::from_str::<Value>(&fs::read_to_string(path).unwrap()).unwrap()
+            } else {
+                envelope
+            };
+            assert_eq!(saved["candidates"], json!(candidates));
+            assert_eq!(saved["notes"], notes);
+            assert_eq!(
+                prompt,
+                review_global::prompt_context(&candidates, &notes, directory.path()).unwrap()
+            );
+        }
         assert!(review_global::validate(&ReviewBotOutput::default(), &[]).is_err());
         review_global::validate(
             &ReviewBotOutput {
