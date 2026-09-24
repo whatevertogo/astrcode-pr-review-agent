@@ -16,6 +16,9 @@ const STATUS_ABORTED: &str = "aborted";
 pub struct Config {
     pub github_user: String,
     pub repos: Vec<String>,
+    /// None inherits repos; an explicit empty list grants no repository-wide mention access.
+    #[serde(default)]
+    pub mention_repos: Option<Vec<String>>,
     #[serde(default = "default_trusted_comment_authors")]
     pub trusted_comment_authors: Vec<String>,
     #[serde(default = "default_mention_search_limit")]
@@ -93,6 +96,7 @@ impl Default for Config {
         Self {
             github_user: "whatevertogo".into(),
             repos: vec!["VitaDynamics/Vvbot".into(), "whatevertogo/astrcodey".into()],
+            mention_repos: None,
             trusted_comment_authors: default_trusted_comment_authors(),
             mention_search_limit: default_mention_search_limit(),
             mention: "@whatevertogo".into(),
@@ -827,19 +831,6 @@ struct PostedPullReview {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct GhUser {
     login: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchPullRequest {
-    number: u64,
-    repository: SearchRepository,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchRepository {
-    name_with_owner: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

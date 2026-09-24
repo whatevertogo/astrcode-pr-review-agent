@@ -2112,36 +2112,6 @@ fn configured_open_prs(config: &Config) -> Result<Vec<(String, PullRequest)>> {
     Ok(candidates.into_values().collect())
 }
 
-fn mentioned_open_prs(config: &Config) -> Result<Vec<(String, PullRequest)>> {
-    let mention = mention_login(config);
-    let limit = config.mention_search_limit.max(1).to_string();
-    let search_results: Vec<SearchPullRequest> = gh_json_with_timeout(&[
-        "search",
-        "prs",
-        "--mentions",
-        &mention,
-        "--state",
-        "open",
-        "--limit",
-        &limit,
-        "--json",
-        "number,repository",
-    ], poll_command_timeout())?;
-
-    let mut prs = Vec::new();
-    for result in search_results {
-        let repo = result.repository.name_with_owner;
-        match pr_details_quick(&repo, result.number) {
-            Ok(pr) => prs.push((repo, pr)),
-            Err(error) => eprintln!(
-                "failed to read globally mentioned PR {repo}#{} details: {error:#}",
-                result.number
-            ),
-        }
-    }
-    Ok(prs)
-}
-
 fn mention_login(config: &Config) -> String {
     config.mention.trim().trim_start_matches('@').to_owned()
 }
@@ -2171,33 +2141,8 @@ fn pr_details(repo: &str, pr_number: u64) -> Result<PullRequest> {
     ])
 }
 
-fn pr_details_quick(repo: &str, pr_number: u64) -> Result<PullRequest> {
-    gh_json_with_timeout(&[
-        "pr",
-        "view",
-        &pr_number.to_string(),
-        "--repo",
-        repo,
-        "--json",
-        "number,title,url,body,headRefOid,baseRefName,files,author",
-    ], poll_command_timeout())
-}
-
-fn issue_comments_quick(repo: &str, pr_number: u64) -> Result<Vec<IssueComment>> {
-    let endpoint = format!("repos/{repo}/issues/{pr_number}/comments?per_page=100");
-    let output = run_command_with_timeout(
-        "gh",
-        &["api", "--paginate", "--slurp", &endpoint],
-        None,
-        poll_command_timeout(),
-    )?;
-    let pages: Vec<Vec<IssueComment>> = serde_json::from_str(&output)
-        .with_context(|| format!("parse gh paginated comments for {repo}#{pr_number}"))?;
-    Ok(pages.into_iter().flatten().collect())
-}
-
 fn add_comment_reaction(repo: &str, comment_id: u64, reaction: &str) -> Result<()> {
-    let result = run_command(
+    let result = run_command_with_timeout(
         "gh",
         &[
             "api",
@@ -2210,6 +2155,7 @@ fn add_comment_reaction(repo: &str, comment_id: u64, reaction: &str) -> Result<(
             &format!("content={reaction}"),
         ],
         None,
+        Duration::from_secs(5),
     );
     match result {
         Ok(_) => Ok(()),
@@ -4367,6 +4313,23 @@ fn run_command_with_timeout(
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<String> {
+    let (success, stdout, stderr) = command_output_with_timeout(program, args, cwd, timeout)?;
+    anyhow::ensure!(
+        success,
+        "{} {} failed: {}",
+        program,
+        args.join(" "),
+        stderr.trim()
+    );
+    Ok(stdout.trim().to_owned())
+}
+
+fn command_output_with_timeout(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout: Duration,
+) -> Result<(bool, String, String)> {
     let mut command = Command::new(program);
     command.args(args);
     if let Some(cwd) = cwd {
@@ -4406,15 +4369,7 @@ fn run_command_with_timeout(
     let stdout = fs::read_to_string(stdout_file.path()).unwrap_or_default();
     let stderr = fs::read_to_string(stderr_file.path()).unwrap_or_default();
 
-    if !status.success() {
-        anyhow::bail!(
-            "{} {} failed: {}",
-            program,
-            args.join(" "),
-            stderr.trim()
-        );
-    }
-    Ok(stdout.trim().to_owned())
+    Ok((status.success(), stdout, stderr))
 }
 
 fn poll_command_timeout() -> Duration {

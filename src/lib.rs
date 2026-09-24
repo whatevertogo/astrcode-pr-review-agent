@@ -26,6 +26,9 @@ include!("review_context.rs");
 include!("review_validation.rs");
 include!("status.rs");
 
+mod mention;
+pub use mention::{discover_once, enqueue_cli, mention_status_cli};
+
 mod review_run;
 pub use review_run::review_cli;
 

@@ -17,10 +17,7 @@ pub fn status_text(config: &Config) -> Result<String> {
         .map(|delivery| {
             format!(
                 "{} {} {:?}: {}",
-                delivery.delivery_id,
-                delivery.event,
-                delivery.action,
-                delivery.status
+                delivery.delivery_id, delivery.event, delivery.action, delivery.status
             )
         })
         .unwrap_or_else(|| "none".into());
@@ -49,6 +46,18 @@ pub fn status_text(config: &Config) -> Result<String> {
             .values()
             .filter(|entry| entry.status == STATUS_PENDING)
             .count();
+    let oldest_pending = state
+        .processed_comments
+        .values()
+        .filter(|r| r.status == STATUS_PENDING)
+        .min_by_key(|r| r.started_at)
+        .map(|r| {
+            format!(
+                "{}#{} comment={} received_at={}",
+                r.repo, r.pr_number, r.comment_id, r.started_at
+            )
+        })
+        .unwrap_or_else(|| "none".into());
     let failed = state
         .processed_comments
         .values()
@@ -67,9 +76,9 @@ pub fn status_text(config: &Config) -> Result<String> {
         "astrcode-pr-review-agent\nrepos: {}\nmention: {}\nwebhook: {} {}\nwebhook queue: \
          {queued_events}\nlast delivery: {last_delivery}\nprocessed comments: {processed}\nauto \
          PR reviews: {auto_reviews}\nseen open PRs: {seen_open_prs}\nauto baseline repos: \
-         {baselined_repos}\ntracked PR sessions: {}\npending: {pending}\nrunning: \
+         {baselined_repos}\ntracked PR sessions: {}\npending: {pending}\noldest pending: {oldest_pending}\nrunning: \
          {running}\nfailed: {failed}\nlast run: {last}\nlast deterministic checks: \
-         {deterministic}\nmemory: {}\nworktrees: {}",
+         {deterministic}\nmemory: {}\nworktrees: {}\n{}",
         config.repos.join(", "),
         config.mention,
         if config.webhook_enabled {
@@ -81,6 +90,7 @@ pub fn status_text(config: &Config) -> Result<String> {
         state.pr_sessions.len(),
         config.memory_dir_path()?.display(),
         config.worktree_dir_path()?.display(),
+        mention::status()?,
     ))
 }
 
@@ -106,22 +116,12 @@ fn load_state() -> Result<State> {
         });
     }
     let raw = fs::read_to_string(&path)?;
-    let mut state: State = match serde_json::from_str(&raw) {
-        Ok(state) => state,
-        Err(error) => {
-            let backup = path.with_extension(format!("legacy-{}.json", now_epoch()));
-            fs::write(&backup, raw)?;
-            eprintln!(
-                "ignored incompatible legacy state {}; backed up to {}: {error}",
-                path.display(),
-                backup.display()
-            );
-            State {
-                version: STATE_VERSION,
-                ..State::default()
-            }
-        },
-    };
+    let mut state: State = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "invalid review state {}; refusing to reset deduplication history",
+            path.display()
+        )
+    })?;
     if state.version == 0 {
         state.version = STATE_VERSION;
     }
@@ -137,9 +137,12 @@ fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(value)? + "\n")?;
-    fs::rename(tmp, path)?;
+    let parent = path.parent().context("JSON path needs parent")?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut tmp, value)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

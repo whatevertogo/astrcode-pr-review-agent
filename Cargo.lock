@@ -74,6 +74,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "astrcode-extension-worker",
+ "chrono",
  "fs2",
  "hmac",
  "serde",
