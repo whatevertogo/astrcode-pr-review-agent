@@ -171,7 +171,7 @@ fn review_file_context(
         file,
         commentable_lines,
         non_commentable_files,
-        one_line,
+        str::to_owned,
     )
 }
 

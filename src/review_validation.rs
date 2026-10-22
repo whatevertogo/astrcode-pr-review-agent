@@ -66,7 +66,8 @@ fn validate_review_output(
     }
 
     let mut residual_risk = output.residual_risk.clone();
-    if context.truncated {
+    // Coverage-first passes use the per-file patches, not the clipped metadata bundle.
+    if context.truncated && config.review_pipeline != "coverage_first" {
         residual_risk.push("审查上下文被插件字节上限截断。".into());
     }
     if !context.non_commentable_files.is_empty() {

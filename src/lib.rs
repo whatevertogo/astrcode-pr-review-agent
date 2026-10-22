@@ -29,6 +29,9 @@ include!("status.rs");
 mod mention;
 mod review_comments;
 mod review_global;
+mod review_memory;
+mod review_planning;
+pub mod git_isolation;
 pub use mention::{discover_once, enqueue_cli, mention_status_cli};
 
 mod review_run;
@@ -144,7 +147,7 @@ mod tests {
         }
     }
 
-    fn test_review_context() -> ReviewContext {
+    pub(super) fn test_review_context() -> ReviewContext {
         let mut commentable_lines = BTreeSet::new();
         commentable_lines.insert(CommentLineKey {
             path: "src/storage.rs".into(),
@@ -298,6 +301,47 @@ mod tests {
         assert!(path.ends_with("memory/repos/VitaDynamics__Vvbot/pr-12.md"));
         let index = repo_memory_index_path(&config, "VitaDynamics/Vvbot").unwrap();
         assert!(index.ends_with("memory/repos/VitaDynamics__Vvbot/index.md"));
+    }
+
+    #[test]
+    fn relevant_history_and_p3_survive_without_recent_repo_noise() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = test_config(root.path());
+        config.review_pipeline = "coverage_first".into();
+        config.inline_priority_max = "P3".into();
+        let trigger = trigger("owner/repo", 7, 1);
+        let path = pr_memory_path(&config, "owner/repo", 7).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "Developer decision: keep the storage API stable.").unwrap();
+        let records = [(8, "src/storage.rs: preserve fsync on success"), (9, "unrelated UI colors")]
+            .map(|(number, summary)| json!({"repo":"owner/repo","pr_number":number,
+                "pr_title":"history","pr_url":"https://github.test/pr","head_sha":"old",
+                "trigger_author":"alice","session_id":"previous","summary":summary,"created_at":1}).to_string());
+        fs::write(config.memory_dir_path().unwrap().join("runs.jsonl"), records.join("\n")).unwrap();
+        let memory = review_memory::relevant(&config, &trigger).unwrap();
+        assert!(memory.contains("keep the storage API stable"));
+        assert!(memory.contains("preserve fsync"));
+        assert!(!memory.contains("UI colors"));
+        let output = ReviewBotOutput { confirmed_findings: vec![review_finding("P3", "Minor defect", 10)], ..Default::default() };
+        let mut context = test_review_context();
+        context.truncated = true;
+        let mut review = validate_review_output(&config, &output, &context);
+        assert!(review.residual_risk.is_empty());
+        let mut unplaced = Vec::new();
+        apply_severity_gate(&config, &trigger, &mut review.inline_findings, &mut unplaced);
+        assert_eq!(review.inline_findings.len(), 1);
+        assert_eq!(review.inline_findings[0].priority, "P3");
+        for category in ["Correctness", "Security", "Reliability/Performance", "Tests/API Contract"] {
+            assert!(PR_REVIEW_BOT_PROMPT.contains(category));
+        }
+        let pass = PassPromptContext { config: &config, trigger: &trigger, worktree: root.path(),
+            memory: &memory, context: &context, deterministic_checks: &[] };
+        let empty = ReviewShard { index: 0, files: Vec::new(), bytes: 0 };
+        let paths = memory_paths(&config, &trigger.repo, trigger.pr.number);
+        let framing = file_review_prompt(&pass, &paths, &empty, "");
+        let rules = "repository instruction ".repeat(1_000);
+        let populated = file_review_prompt(&pass, &paths, &empty, &rules);
+        assert_eq!(populated.len() - framing.len(), rules.len());
     }
 
     #[test]
@@ -465,6 +509,11 @@ mod tests {
             non_commentable,
             vec!["assets/logo.png (modified; no patch)"]
         );
+        let mut indented = files[0].clone();
+        let source = format!("    let value = \"{}  spaced\";", "x".repeat(600));
+        indented.patch = Some(format!("@@ -0,0 +1,1 @@\n+{source}\n"));
+        let (contexts, _, _) = build_review_file_contexts(&Config::default(), &[indented]);
+        assert!(contexts[0].annotated_patch.contains(&format!("RIGHT 1 +{source}")));
     }
 
     #[test]
@@ -821,13 +870,13 @@ One concrete finding and one repo-history reminder.
             bytes: 4,
         });
 
-        let shards = plan_review_shards(&config, &context);
+        let shards = review_planning::plan(&config, &context, 0).unwrap();
         let paths = shards
             .iter()
             .flat_map(|shard| shard.files.iter().map(|file| file.path.as_str()))
             .collect::<Vec<_>>();
 
-        assert_eq!(shards.len(), 2);
+        assert_eq!(shards.len(), 1);
         assert!(paths.contains(&"src/storage.rs"));
         assert!(paths.contains(&"src/other.rs"));
         assert!(!paths.contains(&"Cargo.lock"));

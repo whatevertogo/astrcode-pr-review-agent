@@ -45,9 +45,18 @@ async fn review_trigger(
         trigger.pr = details;
     }
     let worktree = checkout_pr(config, &trigger.repo, &trigger.pr)?;
-    let mut memory = relevant_memory(config, &trigger.repo, trigger.pr.number)?;
-    let related_context = related_github_context(&trigger)
-        .unwrap_or_else(|error| format!("related GitHub context unavailable: {error:#}"));
+    let is_review_task = trigger_requests_review(&trigger);
+    let mut memory = if is_review_task {
+        review_memory::relevant(config, &trigger)?
+    } else {
+        relevant_memory(config, &trigger.repo, trigger.pr.number)?
+    };
+    let related_context = if is_review_task {
+        String::new() // Reviewers can search specific related PRs when the code calls for it.
+    } else {
+        related_github_context(&trigger)
+            .unwrap_or_else(|error| format!("related GitHub context unavailable: {error:#}"))
+    };
     if !related_context.trim().is_empty() {
         memory.push_str("\n\n## Related PRs and Issues\n");
         memory.push_str(related_context.trim());
@@ -58,7 +67,6 @@ async fn review_trigger(
         pr_memory: pr_memory_path(config, &trigger.repo, trigger.pr.number)?,
         runs_log: config.memory_dir_path()?.join("runs.jsonl"),
     };
-    let is_review_task = trigger_requests_review(&trigger);
     let review_context = if is_review_task {
         Some(collect_review_context(config, &trigger, &worktree)?)
     } else {
@@ -409,8 +417,6 @@ async fn run_coverage_first_review(
     }
 
     let (run_orientation, max_file_passes) = review_global::file_budget(config.max_review_passes_per_pr)?;
-    let shards = plan_review_shards(config, context);
-    let mut coverage = initial_coverage(context);
     let mut outputs = Vec::new();
     let deterministic_checks = if let Some(checks)=frozen_checks {
         checks.to_vec()
@@ -419,6 +425,20 @@ async fn run_coverage_first_review(
     } else {
         Vec::new()
     };
+    let prompt_context = PassPromptContext {
+        config,
+        trigger,
+        worktree,
+        memory,
+        context,
+        deterministic_checks: &deterministic_checks,
+    };
+    let empty = ReviewShard { index: 0, files: Vec::new(), bytes: 0 };
+    // Reserve path instructions and framing before assigning any diff, not afterwards.
+    let overhead = file_review_prompt(&prompt_context, memory_paths, &empty, "").len()
+        + config.instruction_context_max_bytes + 1_024;
+    let shards = review_planning::plan(config, context, overhead)?;
+    let mut completed_parts = BTreeMap::new();
     write_debug_artifact(debug_dir.as_deref(), "review-context.txt", &context.text);
     write_debug_artifact(
         debug_dir.as_deref(),
@@ -485,7 +505,11 @@ async fn run_coverage_first_review(
             context,
             deterministic_checks: &deterministic_checks,
         };
-        let prompt = file_review_prompt(&prompt_context, memory_paths, shard);
+        let instructions = instruction_context_for_shard(config, worktree, shard)
+            .unwrap_or_else(|error| format!("instructions unavailable: {error:#}"));
+        let prompt = file_review_prompt(&prompt_context, memory_paths, shard, &instructions);
+        anyhow::ensure!(prompt.len() <= config.review_context_max_bytes,
+            "file review pass {} exceeds the complete request byte budget", shard.index + 1);
         let label = format!("file-pass-{:03}", shard.index + 1);
         match submit_review_pass(
             config,
@@ -504,67 +528,21 @@ async fn run_coverage_first_review(
                 let reviewed = output
                     .files_reviewed
                     .iter()
-                    .map(|path| path.trim())
+                    .map(|path| path.trim().to_owned())
                     .collect::<BTreeSet<_>>();
-                for file in &shard.files {
-                    if matches!(file.kind, ReviewFileKind::Code | ReviewFileKind::Docs) {
-                        if reviewed.contains(file.path.as_str()) {
-                            coverage.mark(
-                                file.path.clone(),
-                                CoverageStatus::Reviewed,
-                                format!("file review pass {}", shard.index + 1),
-                            );
-                        } else {
-                            coverage.mark(
-                                file.path.clone(),
-                                CoverageStatus::Failed,
-                                format!(
-                                    "file review pass {} omitted this file from files_reviewed",
-                                    shard.index + 1
-                                ),
-                            );
-                        }
-                    }
-                }
+                completed_parts.insert(shard.index, reviewed);
                 outputs.push(output);
             },
             Err(error) => {
-                for file in &shard.files {
-                    if matches!(file.kind, ReviewFileKind::Code | ReviewFileKind::Docs) {
-                        coverage.mark(
-                            file.path.clone(),
-                            CoverageStatus::Failed,
-                            format!("file review pass {} failed: {error:#}", shard.index + 1),
-                        );
-                    }
-                }
+                eprintln!("file review pass {} failed: {error:#}", shard.index + 1);
             },
         }
     }
-    if successful_file_passes == 0
-        && shards.iter().take(max_file_passes).any(|shard| {
-            shard
-                .files
-                .iter()
-                .any(|file| matches!(file.kind, ReviewFileKind::Code | ReviewFileKind::Docs))
-        })
+    if successful_file_passes == 0 && !shards.is_empty()
     {
         anyhow::bail!("all file review passes failed; review did not complete");
     }
-    for shard in shards.iter().skip(max_file_passes) {
-        for file in &shard.files {
-            if matches!(file.kind, ReviewFileKind::Code | ReviewFileKind::Docs) {
-                coverage.mark(
-                    file.path.clone(),
-                    CoverageStatus::Failed,
-                    format!(
-                        "not reviewed because max_review_passes_per_pr={} was reached",
-                        config.max_review_passes_per_pr
-                    ),
-                );
-            }
-        }
-    }
+    let coverage = review_planning::coverage(context, &shards, &completed_parts);
 
     let candidates = review_global::candidates(&merge_review_outputs(&outputs));
     let mut merged = {
@@ -769,47 +747,6 @@ fn coverage_residual_risk(coverage: &ReviewCoverage) -> Vec<String> {
         .collect()
 }
 
-fn plan_review_shards(config: &Config, context: &ReviewContext) -> Vec<ReviewShard> {
-    let mut shards = Vec::new();
-    let mut current_files = Vec::new();
-    let mut current_bytes = 0usize;
-    let max_bytes = config.review_shard_max_bytes.max(1);
-    let max_files = config.max_files_per_shard.max(1);
-
-    for file in context.files.iter().filter(|file| {
-        matches!(
-            file.kind,
-            ReviewFileKind::Code | ReviewFileKind::Docs | ReviewFileKind::Oversized
-        )
-    }) {
-        let file_bytes = file.bytes.max(1);
-        let would_exceed_bytes =
-            !current_files.is_empty() && current_bytes.saturating_add(file_bytes) > max_bytes;
-        let would_exceed_files = current_files.len() >= max_files;
-        if would_exceed_bytes || would_exceed_files {
-            shards.push(ReviewShard {
-                index: shards.len(),
-                files: current_files,
-                bytes: current_bytes,
-            });
-            current_files = Vec::new();
-            current_bytes = 0;
-        }
-        current_bytes = current_bytes.saturating_add(file_bytes);
-        current_files.push(file.clone());
-    }
-
-    if !current_files.is_empty() {
-        shards.push(ReviewShard {
-            index: shards.len(),
-            files: current_files,
-            bytes: current_bytes,
-        });
-    }
-
-    shards
-}
-
 fn orientation_review_prompt(
     config: &Config,
     trigger: &ReviewTrigger,
@@ -917,25 +854,12 @@ fn file_review_prompt(
     prompt: &PassPromptContext<'_>,
     memory_paths: &PromptMemoryPaths,
     shard: &ReviewShard,
+    repo_instructions: &str,
 ) -> String {
     let shard_text = shard
         .files
         .iter()
-        .map(|file| {
-            let mut patch = file.annotated_patch.clone();
-            truncate_text(&mut patch, file.bytes.min(60_000));
-            format!(
-                "File kind: {}\nStatus: {}\nAdditions: {} Deletions: {} Changes: {}\nPrevious \
-                 filename: {}\n{}",
-                file.kind.label(),
-                file.status,
-                file.additions,
-                file.deletions,
-                file.changes,
-                file.previous_filename.as_deref().unwrap_or("none"),
-                patch
-            )
-        })
+        .map(|file| file.annotated_patch.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
@@ -962,7 +886,8 @@ fn file_review_prompt(
 - 工作树：`{worktree}`
 - Head SHA：`{sha}`
 - 分片字节数：{shard_bytes}
-- 只审查本分片中的文件。
+- 本片定义负责的修改范围，不限制阅读范围；可搜索并读取相关实现、调用方和测试。
+- 大文件可能分成多片；`files_reviewed` 表示已完整检查本片提供的该文件修改行，不表示读完整个文件。
 - 不要发布 GitHub 评论。
 - 已检查的每个分片文件都必须列入 `<files_reviewed>`。
 - 可执行问题放进 `<finding>` 标签；不要创建 `verification` 项或“通过”的审查备注。
@@ -993,6 +918,8 @@ fn file_review_prompt(
 记忆路径：
 - PR 记忆：`{pr_memory_path}`
 - 仓库记忆索引：`{repo_index_path}`
+- 仅在需要核实具体路径、符号、历史设计决策时检索记忆；不要扫描最近 PR 清单。
+- 相关 PR 讨论只作为线索；已接受、已拒绝或已修复的建议不重复发布，除非当前代码推翻原先依据。
 
 覆盖优先审查的第 {pass} 个分片：
 ```text
@@ -1012,8 +939,7 @@ fn file_review_prompt(
         protocol = PR_REVIEW_BOT_PROMPT.trim(),
         few_shots = PR_REVIEW_FEW_SHOTS_PROMPT.trim(),
         reviewer_profile = reviewer_profile_for_shard(shard),
-        repo_instructions = instruction_context_for_shard(prompt.config, prompt.worktree, shard)
-            .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
+        repo_instructions = repo_instructions,
         deterministic_checks = format_verification_items(prompt.deterministic_checks),
         worktree = prompt.worktree.display(),
         sha = prompt.trigger.pr.head_ref_oid,
@@ -1130,7 +1056,9 @@ fn global_review_prompt(
         worktree = prompt.worktree.display(),
         sha = prompt.trigger.pr.head_ref_oid,
         coverage = coverage.summary_lines(),
-        outputs = serde_json::to_string_pretty(outputs).unwrap_or_else(|_| "[]".into()),
+        outputs = serde_json::to_string_pretty(&outputs.iter().map(|o| json!({
+            "files_reviewed": o.files_reviewed, "investigation_log": o.investigation_log
+        })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
         memory = if prompt.memory.trim().is_empty() {
             "这个 PR 暂无既有记忆。"
         } else {

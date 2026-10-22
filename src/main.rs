@@ -1,7 +1,9 @@
 use anyhow::Result;
+use astrcode_extension_worker::worker_prelude::ExtensionCapability;
 use astrcode_extension_worker::worker_prelude::{
-    command, command_handler, tool, tool_handler, tool_planner, tool_text, ErrorPayload,
-    ExtensionCommandResult, HandlerEffect, HandlerResult, ToolPlan, WireErrorCode, Worker,
+    command, command_handler, tool, tool_handler, tool_input_transform_handler, tool_planner,
+    tool_text, ErrorPayload, ExtensionCommandResult, HandlerEffect, HandlerResult,
+    ToolInputTransformResult, ToolPlan, WireErrorCode, Worker,
 };
 use astrcode_pr_review_agent::{
     poll_forever, poll_once, spawn_webhook_server, status_text, Config,
@@ -55,6 +57,29 @@ async fn run() -> Result<()> {
 
 async fn run_s5r() -> std::result::Result<(), ErrorPayload> {
     let mut worker = Worker::new(EXT_ID, env!("CARGO_PKG_VERSION"));
+    worker.capability(ExtensionCapability::ToolIntercept);
+
+    worker.on_tool_input_transform(tool_input_transform_handler(|input, _ctx| async move {
+        let result = Config::load_or_create()
+            .and_then(|config| {
+                astrcode_pr_review_agent::git_isolation::transform(
+                    &config,
+                    &input.working_dir,
+                    &input.tool_name,
+                    &input.tool_input,
+                )
+            })
+            .map_err(|error| {
+                ErrorPayload::new(
+                    WireErrorCode::InvalidInput,
+                    format!("isolate PR Git config: {error:#}"),
+                )
+            })?;
+        Ok(match result {
+            Some(tool_input) => ToolInputTransformResult::Replace { tool_input },
+            None => ToolInputTransformResult::Unchanged,
+        })
+    }))?;
 
     worker.on_activate(|_config| async move {
         let poll_config = Config::load_or_create().map_err(|error| {

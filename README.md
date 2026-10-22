@@ -102,6 +102,41 @@ are not migrated automatically.
 
 ## Review prompts and comment presentation
 
+The s5r tool-input hook wraps shell/bash calls from sessions rooted under the
+configured PR worktree directory with a fresh temporary Git global config.
+Existing host settings are included for reads; ordinary `git config --global`
+writes cannot persist across tool calls or change the host config. Explicit
+`--global` reads need `--includes` to inspect inherited values. Normal sessions
+are untouched. This guards accidental test writes, not malicious commands,
+explicit `--file` writes, or credential/network access; it is not a sandbox.
+
+For the deployed `coverage_first` pipeline, a complete diff is preferred when it
+fits `review_context_max_bytes` after prompt/instruction overhead. Otherwise,
+`review_shard_max_bytes` bounds each request's diff allowance. These are conservative
+UTF-8 byte budgets, not measurements of model tokens; output/context headroom must
+still be allowed in host model configuration. Same-kind PRs stay together when they
+fit. Mixed PRs larger than `max_files_per_shard` separate code/configuration from
+documentation/skills before byte packing: context capacity is not a guarantee of
+attention to operational consumers. This setting is a small-PR grouping hint in
+this pipeline, not a hard file count per shard. Large files split at hunk boundaries (or whole
+annotated lines for a large hunk); no patch tail is discarded. A file counts as
+reviewed only when every assigned part has a successful file-stage declaration.
+An indivisible over-budget line fails planning visibly rather than pretending it
+was reviewed. Source whitespace is preserved.
+
+Review memory contains bounded current-PR history and up to three prior reviews
+mentioning an exact changed path, not a dump of recent repository reviews. The
+full memory index remains available for targeted tool searches. Existing repo/path
+instructions, the four review lenses, configured P3 publication and the persistent
+PR session remain unchanged. The final global pass explicitly checks each candidate's
+trigger, attribution and counterevidence before the plugin publishes comments.
+
+Design references (adapted, not copied wholesale): PR-Agent's
+[full-diff-first packing](https://github.com/The-PR-Agent/pr-agent/blob/main/pr_agent/algo/pr_processing.py),
+[review evidence criteria](https://github.com/The-PR-Agent/pr-agent/blob/main/pr_agent/settings/pr_reviewer_prompts.toml),
+and Anthropic's [candidate validation](https://github.com/anthropics/claude-code/blob/main/plugins/code-review/commands/code-review.md).
+We do not adopt blanket exclusion of conditional bugs or P3 findings.
+
 Both pipelines compose the same small prompt blocks at compile time:
 
 | Block | Responsibility |
