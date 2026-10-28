@@ -17,6 +17,9 @@ and reserves their prompt bytes before packing. Unassigned files are never
 omitted. If hints are malformed, too large, or worsen pass-budget coverage, the
 ordinary planner remains authoritative. Related paths are investigation leads,
 not reviewed files.
+Budget comparison preserves every path the ordinary plan can fully review within
+the available passes, including all parts of split files; equal shard counts alone
+do not guarantee equal coverage after reordering.
 
 The earlier A/B experiment showed a real regression when all migration code and
 docs were merged into one long prompt. Consequently large mixed behavior groups
@@ -43,6 +46,9 @@ for every finding, verifies matching snapshots/models, and leaves unjudged or
 partial runs incomplete. It tests whether an issue is found before its fix and
 not reported afterward, rather than rewarding comment counts. P3 and unplaced
 findings are included; observations remain separate from confirmed detections.
+Snapshot identity uses the original frozen input path and its pre-run digest,
+not per-binary reserialized outputs whose default fields can differ. The runner
+rejects input mutation, and the evaluator checks the recorded input again.
 
 ## Verification
 

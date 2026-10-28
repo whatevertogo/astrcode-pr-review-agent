@@ -89,13 +89,16 @@ def main():
                 manifest["runs"].append({"sample": sample, "phase": "prepare", "exit_code": code})
                 save()
                 raise RuntimeError(f"snapshot failed: {snapshot / 'process.log'}")
+            snapshot_path = snapshot / "snapshot.json"
+            snapshot_sha256 = digest(snapshot_path)
             order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
             pair = []
             for variant in order:
                 previous = next((r for r in reversed(manifest["runs"])
                                  if r.get("sample") == sample and r.get("variant") == variant
                                  and r.get("binary_sha256") == hashes[variant]
-                                 and r.get("snapshot_sha256") == digest(snapshot / "snapshot.json")
+                                 and r.get("snapshot_path") == str(snapshot_path)
+                                 and r.get("snapshot_sha256") == snapshot_sha256
                                  and r.get("exit_code") == 0 and r.get("status") == "complete"
                                  and r.get("tracked_worktree_clean") is True
                                  and r.get("worktree_head") == head
@@ -110,12 +113,12 @@ def main():
                 print(f"START {identity} {variant}", flush=True)
                 started = time.time()
                 code = run([str(binaries[variant]), *common, "--pipeline", "baseline",
-                            "--snapshot", str(snapshot / "snapshot.json"),
+                            "--snapshot", str(snapshot_path),
                             "--output-dir", str(output)], output)
                 record = {"sample": sample, "variant": variant, "exit_code": code,
                           "started_at": started, "finished_at": time.time(),
                           "binary_sha256": digest(binaries[variant]), "output_dir": str(output),
-                          "snapshot_sha256": digest(snapshot / "snapshot.json")}
+                          "snapshot_path": str(snapshot_path), "snapshot_sha256": snapshot_sha256}
                 worktree = output / "worktrees" / repo.replace("/", "__") / f"pr-{number}"
                 if worktree.exists():
                     actual = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree,
@@ -144,6 +147,8 @@ def main():
                 pair.append(record)
                 save()
                 print(f"END {identity} {variant}: {code}", flush=True)
+                if digest(snapshot_path) != snapshot_sha256:
+                    raise RuntimeError(f"frozen input snapshot changed; deployment gate closed: {output}")
                 if code:
                     raise RuntimeError(f"review failed; deployment gate closed: {output}")
                 if record.get("host_git_config_changed"):

@@ -19,11 +19,15 @@ class EvaluationTest(unittest.TestCase):
                  "expected": [], "forbidden": [{"id": "bug"}], "paired_with": "before"}]}
             manifest = {"binary_sha256": {"baseline": "old", "candidate": "new"}, "runs": []}
             for case in cases["cases"]:
+                snapshot = root / (case["id"] + "-input.json")
+                snapshot.write_text(json.dumps({"head": case["head"], "context": {}}))
                 for variant in ("baseline", "candidate"):
                     directory = root / (case["id"] + variant)
                     directory.mkdir()
-                    snapshot = directory / "snapshot.json"
-                    snapshot.write_text(json.dumps({"head": case["head"]}))
+                    saved_snapshot = json.loads(snapshot.read_text())
+                    if variant == "candidate":
+                        saved_snapshot["context"]["revision"] = None
+                    (directory / "snapshot.json").write_text(json.dumps(saved_snapshot))
                     review = {"inline_findings": [{"severity": "P3", "title": "bug"}] if case["id"] == "before" else [],
                               "coverage": {"entries": {"a.rs": {"status": "Reviewed"}}}}
                     (directory / "result.json").write_text(json.dumps({"repo": "o/r", "pr_number": 1,
@@ -31,6 +35,7 @@ class EvaluationTest(unittest.TestCase):
                     manifest["runs"].append({"sample": f"o/r#1@{case['head']}", "variant": variant,
                         "binary_sha256": manifest["binary_sha256"][variant], "status": "complete", "exit_code": 0,
                         "output_dir": str(directory), "worktree_head": case["head"], "tracked_worktree_clean": True,
+                        "snapshot_path": str(snapshot),
                         "snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest()})
             directory = root / "blind"
             self.assertEqual(prepare(cases, manifest, directory)["missing"], [])
@@ -54,7 +59,7 @@ class EvaluationTest(unittest.TestCase):
             bad[before]["findings"][0]["evidence"] = ""
             with self.assertRaises(ValueError):
                 score(cases, packets, key, bad)
-            snapshot = Path(manifest["runs"][0]["output_dir"]) / "snapshot.json"
+            snapshot = Path(manifest["runs"][0]["snapshot_path"])
             snapshot.write_text("{}")
             with self.assertRaises(ValueError):
                 prepare(cases, manifest, root / "tampered")

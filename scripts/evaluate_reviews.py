@@ -35,7 +35,9 @@ def prepare(cases, manifest, output, seed=0):
             if (result.get("status") != "complete" or record.get("tracked_worktree_clean") is not True
                     or record.get("worktree_head") != case["head"] or record.get("host_git_config_changed")):
                 raise ValueError("incomplete or side-effecting run is not quality evidence")
-            snapshot_digest = hashlib.sha256((directory / "snapshot.json").read_bytes()).hexdigest()
+            # Each binary may reserialize the snapshot with different schema defaults.
+            # Compare the frozen input passed to both runs, not those output copies.
+            snapshot_digest = hashlib.sha256(Path(record["snapshot_path"]).read_bytes()).hexdigest()
             if result["head_sha"] != case["head"] or result["repo"] != case["repo"] or result["pr_number"] != case["pr"]:
                 raise ValueError("result is not the frozen case")
             if snapshot_digest != record["snapshot_sha256"]:

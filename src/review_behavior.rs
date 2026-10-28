@@ -123,7 +123,9 @@ pub(super) fn plan(
     let mut subset = context.clone();
     subset.files.retain(|f| remaining.contains(&f.path));
     shards.extend(review_planning::plan(config, &subset, overhead)?);
-    if shards.len() > max_passes && shards.len() > baseline.len() {
+    if !paths_within_pass_budget(&baseline, max_passes)
+        .is_subset(&paths_within_pass_budget(&shards, max_passes))
+    {
         notes.push("Chain grouping would reduce file coverage under the pass budget; used the ordinary plan.".into());
         shards = baseline;
     }
@@ -135,6 +137,23 @@ pub(super) fn plan(
         chains,
         notes,
     })
+}
+
+fn paths_within_pass_budget(shards: &[ReviewShard], max_passes: usize) -> BTreeSet<&str> {
+    let mut paths = shards
+        .iter()
+        .take(max_passes)
+        .flat_map(|shard| shard.files.iter().map(|file| file.path.as_str()))
+        .collect::<BTreeSet<_>>();
+    // A path split across passes is complete only when every part is in budget.
+    for file in shards
+        .iter()
+        .skip(max_passes)
+        .flat_map(|shard| &shard.files)
+    {
+        paths.remove(file.path.as_str());
+    }
+    paths
 }
 
 fn normalize(hint: &ReviewChain, eligible: &BTreeSet<String>) -> Option<ReviewChain> {
@@ -258,6 +277,47 @@ mod tests {
         let limited = super::plan(&config, &context, 100, &excessive, 2).unwrap();
         assert!(limited.notes.iter().any(|n| n.contains("pass budget")));
         assert!(limited.shards.len() <= 2);
+
+        // Equal shard counts can still move all code outside the executable prefix.
+        let mut budget_context = context.clone();
+        budget_context.files = (0..6)
+            .map(|index| ReviewFileContext {
+                path: format!("src/{index}.rs"),
+                ..original.clone()
+            })
+            .chain(std::iter::once(ReviewFileContext {
+                path: "docs/guide.md".into(),
+                kind: ReviewFileKind::Docs,
+                ..original.clone()
+            }))
+            .collect();
+        let limited = super::plan(
+            &config,
+            &budget_context,
+            100,
+            &[chain(&["docs/guide.md"])],
+            1,
+        )
+        .unwrap();
+        assert_eq!(limited.shards.len(), 2);
+        assert_eq!(limited.shards[0].files.len(), 6);
+        assert!(limited.shards[0]
+            .files
+            .iter()
+            .all(|file| file.path.starts_with("src/")));
+        assert!(limited
+            .notes
+            .iter()
+            .any(|note| note.contains("pass budget")));
+
+        let mut split = limited.shards.clone();
+        let extra_part = split[0].files[0].clone();
+        split[1].files.push(extra_part);
+        assert!(paths_within_pass_budget(&split, 0).is_empty());
+        assert_eq!(paths_within_pass_budget(&split, 1).len(), 5);
+        assert!(!paths_within_pass_budget(&split, 1).contains("src/0.rs"));
+        assert_eq!(paths_within_pass_budget(&split, 2).len(), 7);
+
         let mut unsafe_related = chain(&["src/cancel.rs"]);
         unsafe_related.related_paths = vec!["../outside.rs".into(), "src/caller.rs".into()];
         let filtered = super::plan(&config, &context, 100, &[unsafe_related], 20).unwrap();
