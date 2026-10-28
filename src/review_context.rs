@@ -13,7 +13,7 @@ fn collect_review_context(
             "--repo",
             &trigger.repo,
             "--json",
-            "title,body,baseRefName,headRefOid,files,commits,comments,reviews,reviewDecision,\
+            "title,body,baseRefName,baseRefOid,headRefOid,changedFiles,commits,comments,reviews,reviewDecision,\
              mergeStateStatus",
         ],
         None,
@@ -24,24 +24,10 @@ fn collect_review_context(
             trigger.repo, trigger.pr.number
         )
     })?;
-    let name_only = run_command(
-        "gh",
-        &[
-            "pr",
-            "diff",
-            &pr_number,
-            "--repo",
-            &trigger.repo,
-            "--name-only",
-        ],
-        None,
-    )
-    .with_context(|| {
-        format!(
-            "collect gh pr diff --name-only for {}#{}",
-            trigger.repo, trigger.pr.number
-        )
-    })?;
+    let metadata: Value = serde_json::from_str(&pr_view)?;
+    let revision = ReviewRevision::resolve(worktree, &trigger.pr,
+        Some(metadata["baseRefOid"].as_str().context("PR metadata missing base SHA")?))?;
+    anyhow::ensure!(revision.matches_metadata(&trigger.pr, &metadata), "PR base/head changed while preparing review");
     let checks = run_command(
         "gh",
         &["pr", "checks", &pr_number, "--repo", &trigger.repo],
@@ -53,12 +39,16 @@ fn collect_review_context(
         &[
             "diff",
             "--stat",
-            &format!("origin/{}...HEAD", trigger.pr.base_ref_name),
+            &revision.range(),
+            "--",
         ],
         Some(worktree),
     )
     .unwrap_or_else(|error| format!("git diff --stat unavailable: {error:#}"));
     let files = pull_request_files(&trigger.repo, trigger.pr.number)?;
+    review_revision::validate_manifest(worktree, &revision,
+        metadata["changedFiles"].as_u64().context("PR metadata missing changedFiles")?, &files)?;
+    assert_review_revision_current(trigger, &revision)?;
     let (file_contexts, commentable_lines, non_commentable_files) =
         build_review_file_contexts(config, &files);
     let annotated = file_contexts
@@ -66,10 +56,10 @@ fn collect_review_context(
         .map(|file| file.annotated_patch.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let changed_files_text = if name_only.trim().is_empty() {
+    let changed_files_text = if files.is_empty() {
         "No files returned.".to_string()
     } else {
-        name_only.clone()
+        files.iter().map(|file| file.filename.as_str()).collect::<Vec<_>>().join("\n")
     };
     let annotated_text = if annotated.trim().is_empty() {
         "No annotated patch lines were available.".to_string()
@@ -83,17 +73,18 @@ fn collect_review_context(
     };
 
     let mut text = format!(
-        r#"GitHub command audit:
+        r#"{revision_text}
+GitHub command audit:
 - `gh pr view {pr_number} --repo {repo} --json ...`: collected
-- `gh pr diff {pr_number} --repo {repo} --name-only`: collected
 - `gh api --paginate --slurp repos/{repo}/pulls/{pr_number}/files?per_page=100`: collected {file_count} file(s)
+- File count and paths verified against GitHub metadata and the frozen local diff; base/head checked after collection.
 - `gh pr checks {pr_number} --repo {repo}`: collected or recorded as unavailable
-- `git diff --stat origin/{base}...HEAD`: collected or recorded as unavailable
+- `git diff --stat {range}`: collected or recorded as unavailable
 
 PR metadata JSON:
 {pr_view}
 
-Changed files from `gh pr diff --name-only`:
+Changed files from the paginated PR files API:
 {changed_files_text}
 
 Checks:
@@ -112,7 +103,8 @@ Non-inline-commentable files:
         pr_number = trigger.pr.number,
         repo = trigger.repo,
         file_count = files.len(),
-        base = trigger.pr.base_ref_name,
+        revision_text = revision.prompt(),
+        range = revision.range(),
         pr_view = pr_view,
         changed_files_text = changed_files_text,
         checks = checks,
@@ -122,12 +114,34 @@ Non-inline-commentable files:
     );
     let truncated = truncate_text(&mut text, config.review_context_max_bytes);
     Ok(ReviewContext {
+        revision: Some(revision),
         text,
         commentable_lines,
         non_commentable_files,
         truncated,
         files: file_contexts,
     })
+}
+
+fn assert_review_revision_current(trigger: &ReviewTrigger, revision: &ReviewRevision) -> Result<()> {
+    let metadata = gh_json(&["pr", "view", &trigger.pr.number.to_string(), "--repo", &trigger.repo,
+        "--json", "headRefOid,baseRefOid,baseRefName"])?;
+    anyhow::ensure!(revision.matches_metadata(&trigger.pr, &metadata),
+        "PR base/head changed during review; refusing to mix revisions or publish stale findings");
+    Ok(())
+}
+
+fn assert_review_publishable(trigger: &ReviewTrigger, revision: &ReviewRevision, worktree: &Path) -> Result<()> {
+    let metadata: Value = gh_json(&["pr", "view", &trigger.pr.number.to_string(), "--repo", &trigger.repo,
+        "--json", "headRefOid,baseRefOid,baseRefName"])?;
+    anyhow::ensure!(metadata["headRefOid"] == revision.head_sha && metadata["baseRefName"] == trigger.pr.base_ref_name,
+        "PR head or target branch changed during review; refusing to publish stale findings");
+    // An unrelated commit on main does not invalidate an unchanged PR diff.
+    let current = ReviewRevision::resolve(worktree, &trigger.pr,
+        Some(metadata["baseRefOid"].as_str().context("missing current PR base SHA")?))?;
+    anyhow::ensure!(current.merge_base_sha == revision.merge_base_sha,
+        "PR merge base changed during review; refusing to publish findings for an obsolete diff");
+    Ok(())
 }
 
 fn pull_request_files(repo: &str, pr_number: u64) -> Result<Vec<PullRequestApiFile>> {

@@ -194,8 +194,9 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
         pr: pr.clone(),
         kind: ReviewTriggerKind::NewPullRequest,
     };
+    let revision = ReviewRevision::resolve(&worktree, &pr, Some(&base_sha))?;
     let checks = if config.deterministic_checks_enabled {
-        deterministic_review_verification(config, &review_trigger, &worktree)
+        deterministic_review_verification(config, &review_trigger, &worktree, &revision)
     } else {
         Vec::new()
     };
@@ -227,6 +228,7 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
         instructions,
         request: String::new(),
         context: ReviewContext {
+            revision: Some(revision),
             text,
             commentable_lines,
             non_commentable_files,
@@ -254,11 +256,6 @@ pub(super) fn pin_base(worktree: &Path, branch: &str, sha: &str) -> Result<()> {
     run_command(
         "git",
         &["update-ref", &format!("refs/remotes/origin/{branch}"), sha],
-        Some(worktree),
-    )?;
-    run_command(
-        "git",
-        &["update-ref", &format!("refs/heads/{branch}"), sha],
         Some(worktree),
     )?;
     Ok(())
@@ -485,6 +482,7 @@ pub(super) fn shards(
         });
         if create {
             result.push(ReviewShard {
+                focus: String::new(),
                 index: result.len(),
                 files: Vec::new(),
                 bytes: 0,

@@ -31,6 +31,9 @@ mod review_comments;
 mod review_global;
 mod review_memory;
 mod review_planning;
+mod review_behavior;
+mod review_revision;
+use review_revision::ReviewRevision;
 pub mod git_isolation;
 pub use mention::{discover_once, enqueue_cli, mention_status_cli};
 
@@ -63,7 +66,7 @@ mod tests {
         }
     }
 
-    fn pr() -> PullRequest {
+    pub(super) fn pr() -> PullRequest {
         PullRequest {
             number: 7,
             title: "Improve storage".into(),
@@ -160,6 +163,7 @@ mod tests {
             line: 8,
         });
         ReviewContext {
+            revision: None,
             text: "GitHub command audit:\n- `gh pr view 7 --repo whatevertogo/astrcodey --json \
                    ...`: collected\n\nAnnotated diff.\n--- file: src/storage.rs status=modified \
                    +1 -1 changes=2\n@@ -8,1 +10,1 @@\nLEFT 8 -old\nRIGHT 10 +new"
@@ -336,7 +340,7 @@ mod tests {
         }
         let pass = PassPromptContext { config: &config, trigger: &trigger, worktree: root.path(),
             memory: &memory, context: &context, deterministic_checks: &[] };
-        let empty = ReviewShard { index: 0, files: Vec::new(), bytes: 0 };
+        let empty = ReviewShard { index: 0, files: Vec::new(), bytes: 0, focus: String::new() };
         let paths = memory_paths(&config, &trigger.repo, trigger.pr.number);
         let framing = file_review_prompt(&pass, &paths, &empty, "");
         let rules = "repository instruction ".repeat(1_000);
@@ -807,6 +811,30 @@ One concrete finding and one repo-history reminder.
             &[]
         )
         .is_err());
+    }
+
+    #[test]
+    fn review_protocol_does_not_mistake_code_objects_for_empty_results() {
+        // The real #1308 response contained an empty activation set in its evidence.
+        for code in ["{}", "{\"state\":\"empty\"}", "{\"summary\":\"code value\"}", "{not JSON}"] {
+            let text = format!("Reviewed the caller.\n<investigation_log>\n- src/gate.rs:42 clears the set to {code}; caller.rs:10 checks it.\n</investigation_log>\n<summary>No new defect</summary>\n<global_review_complete>true</global_review_complete>");
+            let parsed = parse_review_bot_output(&text).unwrap();
+            review_global::validate(&parsed, &[]).unwrap();
+            assert_eq!(parsed.investigation_log.len(), 1);
+            assert!(parsed.investigation_log[0].contains(code));
+        }
+        for json in ["{}", "{\"state\":\"empty\"}", "[]"] {
+            assert!(parse_review_bot_output(json).is_err(), "{json}");
+        }
+        let json = json!({"global_review_complete":true,
+            "investigation_log":["src/x.rs:10 contains <summary>not a protocol</summary> and {}"],
+            "candidate_checks":[], "confirmed_findings":[], "advisory_findings":[]}).to_string();
+        for text in [json.clone(), format!("```json\n{json}\n```"), format!("Result:\n{json}")] {
+            let parsed = parse_review_bot_output(&text).unwrap();
+            review_global::validate(&parsed, &[]).unwrap();
+            assert!(parsed.summary.is_none());
+            assert_eq!(parsed.investigation_log.len(), 1);
+        }
     }
 
     #[tokio::test]

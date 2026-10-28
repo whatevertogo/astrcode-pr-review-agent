@@ -24,9 +24,17 @@ def main():
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--sample", action="append", required=True,
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sample", action="append",
                         help="OWNER/REPO#NUMBER@HEAD_SHA; repeat for each sample")
+    source.add_argument("--cases", type=Path, help="Pinned case file; expectations stay out of model prompts")
     args = parser.parse_args()
+    samples = args.sample
+    if args.cases:
+        cases = json.loads(args.cases.read_text())["cases"]
+        samples = [f"{case['repo']}#{case['pr']}@{case['head']}" for case in cases]
+    if len(samples) != len(set(samples)):
+        raise ValueError("duplicate frozen samples")
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=args.resume)
     resident = Path.home() / ".astrcode/pr-review-agent"
@@ -69,10 +77,10 @@ def main():
         # Never interrupt a review already in progress.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save()
-        for index, sample in enumerate(args.sample):
+        for index, sample in enumerate(samples):
             identity, head = sample.rsplit("@", 1)
             repo, number = identity.rsplit("#", 1)
-            directory = root / f"{repo.replace('/', '__')}-{number}"
+            directory = root / f"{repo.replace('/', '__')}-{number}-{head[:12]}"
             snapshot = directory / "snapshot"
             common = ["review", "--repo", repo, "--pr", number]
             code = run([str(binaries["baseline"]), *common, "--head", head,
@@ -88,7 +96,10 @@ def main():
                                  if r.get("sample") == sample and r.get("variant") == variant
                                  and r.get("binary_sha256") == hashes[variant]
                                  and r.get("snapshot_sha256") == digest(snapshot / "snapshot.json")
-                                 and r.get("exit_code") == 0 and r.get("status") == "complete"), None)
+                                 and r.get("exit_code") == 0 and r.get("status") == "complete"
+                                 and r.get("tracked_worktree_clean") is True
+                                 and r.get("worktree_head") == head
+                                 and not r.get("host_git_config_changed")), None)
                 if previous:
                     saved = Path(previous.get("output_dir", directory / variant)) / "result.json"
                     if saved.exists():

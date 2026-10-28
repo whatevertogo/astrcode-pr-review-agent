@@ -41,9 +41,7 @@ async fn review_trigger(
         return review_run::poll_review(config, state, run_info, trigger).await;
     }
     let mut trigger = trigger.clone();
-    if let Ok(details) = pr_details(&trigger.repo, trigger.pr.number) {
-        trigger.pr = details;
-    }
+    trigger.pr = pr_details(&trigger.repo, trigger.pr.number)?;
     let worktree = checkout_pr(config, &trigger.repo, &trigger.pr)?;
     let is_review_task = trigger_requests_review(&trigger);
     let mut memory = if is_review_task {
@@ -117,6 +115,9 @@ async fn review_trigger(
         }
         let mut validated = result?;
         suppress_repeated_findings(state, &trigger, &mut validated);
+        if let Some(revision) = &context.revision {
+            assert_review_publishable(&trigger, revision, &worktree)?;
+        }
         let mut published = publish_structured_review(config, &trigger, &session_id, &validated)?;
         post_final_structured_report(
             config,
@@ -391,6 +392,12 @@ async fn run_coverage_first_review(
     context: &ReviewContext,
     frozen_checks: Option<&[VerificationItem]>,
 ) -> Result<ValidatedReview> {
+    // Legacy saved snapshots may lack revision metadata, but must still use the
+    // fully-qualified fetched ref, never a stale branch from the bare clone.
+    let mut context = context.clone();
+    context.revision = Some(ReviewRevision::resolve(worktree, &trigger.pr,
+        context.revision.as_ref().map(|revision| revision.base_sha.as_str()))?);
+    let context = &context;
     let debug_dir = create_debug_run_dir(config, trigger).ok();
     if config.review_pipeline != "coverage_first" {
         let prompt = review_prompt(
@@ -421,7 +428,7 @@ async fn run_coverage_first_review(
     let deterministic_checks = if let Some(checks)=frozen_checks {
         checks.to_vec()
     } else if config.deterministic_checks_enabled {
-        deterministic_review_verification(config, trigger, worktree)
+        deterministic_review_verification(config, trigger, worktree, context.revision.as_ref().expect("resolved revision"))
     } else {
         Vec::new()
     };
@@ -433,11 +440,12 @@ async fn run_coverage_first_review(
         context,
         deterministic_checks: &deterministic_checks,
     };
-    let empty = ReviewShard { index: 0, files: Vec::new(), bytes: 0 };
+    let empty = ReviewShard { index: 0, files: Vec::new(), bytes: 0, focus: String::new() };
     // Reserve path instructions and framing before assigning any diff, not afterwards.
     let overhead = file_review_prompt(&prompt_context, memory_paths, &empty, "").len()
         + config.instruction_context_max_bytes + 1_024;
-    let shards = review_planning::plan(config, context, overhead)?;
+    // Validate capacity before spending a model turn; orientation then proposes grouping.
+    review_planning::plan(config, context, overhead)?;
     let mut completed_parts = BTreeMap::new();
     write_debug_artifact(debug_dir.as_deref(), "review-context.txt", &context.text);
     write_debug_artifact(
@@ -445,8 +453,7 @@ async fn run_coverage_first_review(
         "deterministic-checks.json",
         &serde_json::to_string_pretty(&deterministic_checks).unwrap_or_default(),
     );
-    let base_sha = run_command("git", &["merge-base", "HEAD", &trigger.pr.base_ref_name], Some(worktree))?;
-    let identity = json!({"version":2,"head":trigger.pr.head_ref_oid,"base":base_sha.trim(),
+    let identity = json!({"version":4,"revision":context.revision,
         "config":config,"model":review_run::model_identity(run_info)?,"context":context.text}).to_string();
     let mut staging = match StagedReviewRun::load(trigger, identity) {
         Ok(run) => {
@@ -495,6 +502,13 @@ async fn run_coverage_first_review(
         }
     }
 
+    let hints = outputs.first().map(|output| output.review_chains.as_slice()).unwrap_or_default();
+    let plan = review_behavior::plan(config, context, overhead, hints, max_file_passes)?;
+    write_debug_artifact(debug_dir.as_deref(), "behavior-plan.json", &serde_json::to_string_pretty(&plan)?);
+    if let Some(orientation) = outputs.first_mut() {
+        orientation.review_chains = plan.chains.clone();
+    }
+    let shards = &plan.shards;
     let mut successful_file_passes = 0usize;
     for shard in shards.iter().take(max_file_passes) {
         let prompt_context = PassPromptContext {
@@ -886,6 +900,8 @@ fn file_review_prompt(
 - 工作树：`{worktree}`
 - Head SHA：`{sha}`
 - 分片字节数：{shard_bytes}
+{revision}
+{focus}
 - 本片定义负责的修改范围，不限制阅读范围；可搜索并读取相关实现、调用方和测试。
 - 大文件可能分成多片；`files_reviewed` 表示已完整检查本片提供的该文件修改行，不表示读完整个文件。
 - 不要发布 GitHub 评论。
@@ -944,6 +960,8 @@ fn file_review_prompt(
         worktree = prompt.worktree.display(),
         sha = prompt.trigger.pr.head_ref_oid,
         shard_bytes = shard.bytes,
+        revision = prompt.context.revision.as_ref().map(ReviewRevision::prompt).unwrap_or_default(),
+        focus = shard.focus,
         memory = if prompt.memory.trim().is_empty() {
             "这个 PR 暂无既有记忆。"
         } else {
@@ -1057,7 +1075,8 @@ fn global_review_prompt(
         sha = prompt.trigger.pr.head_ref_oid,
         coverage = coverage.summary_lines(),
         outputs = serde_json::to_string_pretty(&outputs.iter().map(|o| json!({
-            "files_reviewed": o.files_reviewed, "investigation_log": o.investigation_log
+            "files_reviewed": o.files_reviewed, "investigation_log": o.investigation_log,
+            "review_chains": o.review_chains
         })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
         memory = if prompt.memory.trim().is_empty() {
             "这个 PR 暂无既有记忆。"
@@ -1069,7 +1088,7 @@ fn global_review_prompt(
 }
 
 fn short_context_for_global_pass(context: &ReviewContext) -> String {
-    context
+    let manifest = context
         .files
         .iter()
         .map(|file| {
@@ -1084,7 +1103,8 @@ fn short_context_for_global_pass(context: &ReviewContext) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    format!("{}\n{manifest}", context.revision.as_ref().map(ReviewRevision::prompt).unwrap_or_default())
 }
 
 fn reviewer_profile_for_shard(shard: &ReviewShard) -> String {
@@ -1355,8 +1375,9 @@ fn deterministic_review_verification(
     config: &Config,
     trigger: &ReviewTrigger,
     worktree: &Path,
+    revision: &ReviewRevision,
 ) -> Vec<VerificationItem> {
-    let base = format!("origin/{}...HEAD", trigger.pr.base_ref_name);
+    let base = revision.range();
     let mut checks = vec![run_verification_command(
         "git diff --check",
         "git",
@@ -2309,25 +2330,42 @@ async fn parse_or_repair_checked_output(
 }
 
 fn parse_review_bot_output(text: &str) -> Result<ReviewBotOutput> {
-    let json_error = match extract_json_object(text) {
-        Some(candidate) => match serde_json::from_str(candidate) {
-            Ok(output) => return Ok(remove_empty_finding_placeholders(output)),
-            Err(error) => Some(error),
-        },
-        None => None,
-    };
-    match parse_tagged_review_output(text) {
-        Ok(output) => Ok(remove_empty_finding_placeholders(output)),
-        Err(tag_error) => match json_error {
-            Some(error) => Err(error).with_context(|| {
-                format!(
-                    "parse assistant response as ReviewBotOutput JSON; tagged parse also failed: \
-                     {tag_error:#}"
-                )
-            }),
-            None => Err(tag_error),
-        },
+    let trimmed = text.trim();
+    let document = trimmed.strip_prefix("```json\n")
+        .or_else(|| trimmed.strip_prefix("```\n"))
+        .and_then(|body| body.strip_suffix("```"))
+        .unwrap_or(trimmed).trim();
+    // A complete JSON document wins over tag-looking strings inside its fields.
+    if let Ok(value) = serde_json::from_str::<Value>(document) {
+        return parse_review_json(value);
     }
+    let prefix = text.split_once('{').map(|(prefix, _)| prefix).unwrap_or(text);
+    let tagged_before_json = ["files_reviewed", "investigation_log", "finding", "observation",
+        "summary", "residual_risk", "global_review_complete", "candidate_check", "review_chain"]
+        .iter().any(|tag| prefix.contains(&format!("<{tag}")));
+    if !tagged_before_json {
+        if let Some(candidate) = extract_json_object(text) {
+            if let Ok(output) = serde_json::from_str(candidate).map_err(anyhow::Error::from).and_then(parse_review_json) {
+                return Ok(output);
+            }
+        }
+    }
+    // Prose and tagged evidence can contain literal `{}` (sets, code, config).
+    // Parse the declared protocol before looking for embedded JSON objects.
+    if let Ok(output) = parse_tagged_review_output(text) {
+        return Ok(remove_empty_finding_placeholders(output));
+    }
+    let candidate = extract_json_object(text).context("response has no review JSON or tagged blocks")?;
+    parse_review_json(serde_json::from_str(candidate).context("parse review JSON")?)
+}
+
+fn parse_review_json(value: Value) -> Result<ReviewBotOutput> {
+    let object = value.as_object().context("review response is not a JSON object")?;
+    anyhow::ensure!(object.keys().any(|key| matches!(key.as_str(),
+        "files_reviewed" | "confirmed_findings" | "advisory_findings" | "observations" |
+        "investigation_log" | "residual_risk" | "summary" | "global_review_complete" | "candidate_checks" | "review_chains")),
+        "JSON object has no review protocol fields");
+    Ok(remove_empty_finding_placeholders(serde_json::from_value(value)?))
 }
 
 // Ignore only empty protocol scaffolding. Partial findings with any substantive
@@ -2363,6 +2401,13 @@ struct TaggedBlock {
 fn parse_tagged_review_output(text: &str) -> Result<ReviewBotOutput> {
     let mut output = ReviewBotOutput::default();
     let mut recognized = false;
+    for block in extract_tag_blocks(text, "review_chain") {
+        // Invalid optional planning hints fall back to deterministic file packing.
+        recognized = true;
+        if let Ok(chain) = serde_json::from_str(&block.body) {
+            output.review_chains.push(chain);
+        }
+    }
     output.global_review_complete = extract_tag_blocks(text, "global_review_complete")
         .iter().any(|block| block.body.trim() == "true");
     recognized |= output.global_review_complete;

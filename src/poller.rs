@@ -42,7 +42,7 @@ pub async fn poll_once(config: &Config) -> Result<()> {
                 .unwrap_or_else(now_epoch),
             finished_at: Some(now_epoch()),
             status: "failed".into(),
-            message: error.to_string(),
+            message: format!("{error:#}"),
         },
     });
     save_state(&state)?;
@@ -383,7 +383,7 @@ async fn process_trigger(
             append_run_log(config, &record)?;
         }
         Err(error) => {
-            let error_text = error.to_string();
+            let error_text = format!("{error:#}");
             mark_trigger_failed(state, &key, &trigger, error_text.clone());
             if config.auto_review_failure_comment {
                 match post_auto_review_failure_comment(config, &trigger, &error_text) {

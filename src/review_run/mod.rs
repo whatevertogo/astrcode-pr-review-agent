@@ -399,6 +399,7 @@ pub(super) fn status_comment(
         pr: trigger.pr.clone(),
         base_sha: String::new(),
         context: ReviewContext {
+            revision: None,
             text: String::new(),
             files: Vec::new(),
             commentable_lines: BTreeSet::new(),

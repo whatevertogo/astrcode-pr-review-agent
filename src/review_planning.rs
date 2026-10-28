@@ -39,6 +39,7 @@ pub(super) fn plan(
             index: 0,
             files,
             bytes,
+            focus: String::new(),
         }]);
     }
     let budget = config
@@ -69,6 +70,7 @@ pub(super) fn plan(
                     index: shards.len(),
                     files: Vec::new(),
                     bytes: 0,
+                    focus: String::new(),
                 });
             }
             let shard = shards.last_mut().expect("a shard was just created");
