@@ -24,9 +24,17 @@ def main():
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--sample", action="append", required=True,
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sample", action="append",
                         help="OWNER/REPO#NUMBER@HEAD_SHA; repeat for each sample")
+    source.add_argument("--cases", type=Path, help="Pinned case file; expectations stay out of model prompts")
     args = parser.parse_args()
+    samples = args.sample
+    if args.cases:
+        cases = json.loads(args.cases.read_text())["cases"]
+        samples = [f"{case['repo']}#{case['pr']}@{case['head']}" for case in cases]
+    if len(samples) != len(set(samples)):
+        raise ValueError("duplicate frozen samples")
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=args.resume)
     resident = Path.home() / ".astrcode/pr-review-agent"
@@ -69,10 +77,10 @@ def main():
         # Never interrupt a review already in progress.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         save()
-        for index, sample in enumerate(args.sample):
+        for index, sample in enumerate(samples):
             identity, head = sample.rsplit("@", 1)
             repo, number = identity.rsplit("#", 1)
-            directory = root / f"{repo.replace('/', '__')}-{number}"
+            directory = root / f"{repo.replace('/', '__')}-{number}-{head[:12]}"
             snapshot = directory / "snapshot"
             common = ["review", "--repo", repo, "--pr", number]
             code = run([str(binaries["baseline"]), *common, "--head", head,
@@ -81,14 +89,20 @@ def main():
                 manifest["runs"].append({"sample": sample, "phase": "prepare", "exit_code": code})
                 save()
                 raise RuntimeError(f"snapshot failed: {snapshot / 'process.log'}")
+            snapshot_path = snapshot / "snapshot.json"
+            snapshot_sha256 = digest(snapshot_path)
             order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
             pair = []
             for variant in order:
                 previous = next((r for r in reversed(manifest["runs"])
                                  if r.get("sample") == sample and r.get("variant") == variant
                                  and r.get("binary_sha256") == hashes[variant]
-                                 and r.get("snapshot_sha256") == digest(snapshot / "snapshot.json")
-                                 and r.get("exit_code") == 0 and r.get("status") == "complete"), None)
+                                 and r.get("snapshot_path") == str(snapshot_path)
+                                 and r.get("snapshot_sha256") == snapshot_sha256
+                                 and r.get("exit_code") == 0 and r.get("status") == "complete"
+                                 and r.get("tracked_worktree_clean") is True
+                                 and r.get("worktree_head") == head
+                                 and not r.get("host_git_config_changed")), None)
                 if previous:
                     saved = Path(previous.get("output_dir", directory / variant)) / "result.json"
                     if saved.exists():
@@ -99,12 +113,12 @@ def main():
                 print(f"START {identity} {variant}", flush=True)
                 started = time.time()
                 code = run([str(binaries[variant]), *common, "--pipeline", "baseline",
-                            "--snapshot", str(snapshot / "snapshot.json"),
+                            "--snapshot", str(snapshot_path),
                             "--output-dir", str(output)], output)
                 record = {"sample": sample, "variant": variant, "exit_code": code,
                           "started_at": started, "finished_at": time.time(),
                           "binary_sha256": digest(binaries[variant]), "output_dir": str(output),
-                          "snapshot_sha256": digest(snapshot / "snapshot.json")}
+                          "snapshot_path": str(snapshot_path), "snapshot_sha256": snapshot_sha256}
                 worktree = output / "worktrees" / repo.replace("/", "__") / f"pr-{number}"
                 if worktree.exists():
                     actual = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree,
@@ -133,6 +147,8 @@ def main():
                 pair.append(record)
                 save()
                 print(f"END {identity} {variant}: {code}", flush=True)
+                if digest(snapshot_path) != snapshot_sha256:
+                    raise RuntimeError(f"frozen input snapshot changed; deployment gate closed: {output}")
                 if code:
                     raise RuntimeError(f"review failed; deployment gate closed: {output}")
                 if record.get("host_git_config_changed"):

@@ -496,6 +496,8 @@ struct PullRequestApiFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewContext {
+    #[serde(default)]
+    revision: Option<ReviewRevision>,
     text: String,
     commentable_lines: BTreeSet<CommentLineKey>,
     non_commentable_files: Vec<String>,
@@ -551,6 +553,8 @@ struct ReviewShard {
     index: usize,
     files: Vec<ReviewFileContext>,
     bytes: usize,
+    #[serde(default)]
+    focus: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,6 +681,8 @@ impl CommentSide {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ReviewBotOutput {
+    #[serde(default, deserialize_with = "review_behavior::deserialize_chains")]
+    review_chains: Vec<review_behavior::ReviewChain>,
     #[serde(default)]
     global_review_complete: bool,
     #[serde(default)]

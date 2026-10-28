@@ -214,6 +214,7 @@ pub(super) fn fixture(patch: &str) -> ReviewContext {
     let (files, commentable_lines, non_commentable_files) =
         build_review_file_contexts(&Config::default(), &[file]);
     ReviewContext {
+        revision: None,
         text: String::new(),
         files,
         commentable_lines,

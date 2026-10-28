@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "scope": "Starter regression corpus, not a statistical quality benchmark. Expected issues are withheld from model prompts.",
+  "cases": [
+    {
+      "id": "registry-before-lock-fix",
+      "repo": "VitaDynamics/Vvbot",
+      "pr": 1269,
+      "head": "4c97cf80c1e1d63b31d2d36e245137aaf529a077",
+      "expected": [
+        {"id": "registry-lock-mismatch", "description": "Aorta dependency manifests switch from Git to the private registry but Cargo.lock still pins Git sources; --locked builds cannot update the lock.", "evidence": "Cargo.toml, Cargo.lock; fixed by 96926d38088b9de4b0d163d869d17ecf2634a59f"},
+        {"id": "stale-git-troubleshooting", "description": "Active build/deploy guidance still requires the old private Git dependency access after the registry migration.", "evidence": "docs/operations/build-and-deploy.md, section 6; compare scripts/build-board-binary.sh"},
+        {"id": "stale-flatc-prerequisite", "description": "Board build/deploy documentation and skill prerequisites still require flatc although the migrated build path no longer invokes the require-flatc environment check.", "evidence": "docs/operations/build-and-deploy.md, section 10.1; .claude/skills/vbot-agent-harness-board-deploy/SKILL.md; scripts/build-board-binary.sh"}
+      ],
+      "forbidden": [],
+      "paired_with": "registry-after-lock-fix"
+    },
+    {
+      "id": "registry-after-lock-fix",
+      "repo": "VitaDynamics/Vvbot",
+      "pr": 1269,
+      "head": "96926d38088b9de4b0d163d869d17ecf2634a59f",
+      "expected": [
+        {"id": "stale-git-troubleshooting", "description": "The lock-only fix does not update obsolete private Git troubleshooting.", "evidence": "docs/operations/build-and-deploy.md; 96926d3 changes only Cargo.lock"},
+        {"id": "stale-flatc-prerequisite", "description": "The lock-only fix does not update obsolete flatc prerequisites.", "evidence": "docs/operations/build-and-deploy.md; .claude/skills/vbot-agent-harness-board-deploy/SKILL.md"}
+      ],
+      "forbidden": [
+        {"id": "registry-lock-mismatch", "description": "Do not repeat the claim that Cargo.lock still uses the old Aorta Git sources; the fix updates them to the registry."}
+      ],
+      "paired_with": "registry-before-lock-fix"
+    },
+    {
+      "id": "ignored-red-test-control",
+      "repo": "VitaDynamics/Vvbot",
+      "pr": 1271,
+      "head": "c4c547a53c6f2c590be1818fa528e8ec21545996",
+      "expected": [],
+      "forbidden": [
+        {"id": "ignored-test-breaks-default-ci", "description": "The intentionally ignored red test is not a new failure in the default test run; reporting its expected failure as a production regression is incorrect."}
+      ]
+    }
+  ]
+}

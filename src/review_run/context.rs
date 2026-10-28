@@ -81,10 +81,10 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
         "--repo",
         &options.repo,
         "--json",
-        "headRefOid,baseRefOid",
+        "headRefOid,baseRefOid,baseRefName,changedFiles",
     ])?;
     anyhow::ensure!(
-        identity["headRefOid"] == pr.head_ref_oid,
+        identity["headRefOid"] == pr.head_ref_oid && identity["baseRefName"] == pr.base_ref_name,
         "PR changed while collecting metadata"
     );
     let mut base_sha = identity["baseRefOid"]
@@ -158,6 +158,14 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
     } else {
         pull_request_files(&options.repo, options.pr)?
     };
+    let revision = ReviewRevision::resolve(&worktree, &pr, Some(&base_sha))?;
+    if options.head.is_none() {
+        review_revision::validate_manifest(
+            &worktree, &revision,
+            identity["changedFiles"].as_u64().context("PR metadata missing changedFiles")?,
+            &files,
+        )?;
+    }
     for file in &mut files {
         // Local immutable revisions also cover GitHub's truncated or absent patches.
         let range = format!("{base_sha}...{}", pr.head_ref_oid);
@@ -195,7 +203,7 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
         kind: ReviewTriggerKind::NewPullRequest,
     };
     let checks = if config.deterministic_checks_enabled {
-        deterministic_review_verification(config, &review_trigger, &worktree)
+        deterministic_review_verification(config, &review_trigger, &worktree, &revision)
     } else {
         Vec::new()
     };
@@ -227,6 +235,7 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
         instructions,
         request: String::new(),
         context: ReviewContext {
+            revision: Some(revision),
             text,
             commentable_lines,
             non_commentable_files,
@@ -254,11 +263,6 @@ pub(super) fn pin_base(worktree: &Path, branch: &str, sha: &str) -> Result<()> {
     run_command(
         "git",
         &["update-ref", &format!("refs/remotes/origin/{branch}"), sha],
-        Some(worktree),
-    )?;
-    run_command(
-        "git",
-        &["update-ref", &format!("refs/heads/{branch}"), sha],
         Some(worktree),
     )?;
     Ok(())
@@ -485,6 +489,7 @@ pub(super) fn shards(
         });
         if create {
             result.push(ReviewShard {
+                focus: String::new(),
                 index: result.len(),
                 files: Vec::new(),
                 bytes: 0,

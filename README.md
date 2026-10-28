@@ -102,6 +102,14 @@ are not migrated automatically.
 
 ## Review prompts and comment presentation
 
+Review stages share pinned base/head/merge-base SHAs, not local branch names from
+the shared bare cache. The paginated PR file manifest is checked against GitHub's
+file count and the local diff. Retargeting, force pushes or an altered merge base
+prevent publishing an obsolete review; unrelated base-tip advances are allowed.
+The overall GitHub diff endpoint is not required, so its large-diff line limit
+does not prevent file discovery. Literal JSON/code objects inside tagged evidence
+are not accepted as empty review results.
+
 The s5r tool-input hook wraps shell/bash calls from sessions rooted under the
 configured PR worktree directory with a fresh temporary Git global config.
 Existing host settings are included for reads; ordinary `git config --global`
@@ -110,7 +118,19 @@ writes cannot persist across tool calls or change the host config. Explicit
 are untouched. This guards accidental test writes, not malicious commands,
 explicit `--file` writes, or credential/network access; it is not a sandbox.
 
-For the deployed `coverage_first` pipeline, a complete diff is preferred when it
+The `coverage_first` orientation pass can propose behavior chains: changed files,
+related unchanged consumers, and concrete questions to investigate. The plugin
+validates those optional hints before grouping files; unusable paths are dropped
+individually, overlapping chains are merged, unassigned files keep the ordinary
+plan, and malformed or over-budget hints do not invalidate findings. Large mixed
+groups keep a separate docs-consumer pass.
+Every shard carries its chain's questions and related paths, not just a filename
+list. The final pass receives the accepted plan plus investigation evidence.
+`behavior-plan.json` records assignments and fallback reasons; a proposed path is
+never credited as reviewed. If grouping would worsen coverage under the pass
+budget, the original complete-patch plan wins.
+
+Within a group or when no valid hints are supplied, a complete diff is preferred when it
 fits `review_context_max_bytes` after prompt/instruction overhead. Otherwise,
 `review_shard_max_bytes` bounds each request's diff allowance. These are conservative
 UTF-8 byte budgets, not measurements of model tokens; output/context headroom must
@@ -136,6 +156,22 @@ Design references (adapted, not copied wholesale): PR-Agent's
 [review evidence criteria](https://github.com/The-PR-Agent/pr-agent/blob/main/pr_agent/settings/pr_reviewer_prompts.toml),
 and Anthropic's [candidate validation](https://github.com/anthropics/claude-code/blob/main/plugins/code-review/commands/code-review.md).
 We do not adopt blanket exclusion of conditional bugs or P3 findings.
+
+The starter [quality corpus](evaluations/cases.json) pins a real defect before and
+after its fix, plus an ignored-red-test control. Use `scripts/compare_binaries.py
+--cases evaluations/cases.json` with explicit baseline/candidate binaries and a
+fresh output root. Different heads of the same PR have separate snapshot paths.
+Put remote experiment roots under the configured PR worktree directory so the
+installed Git-isolation hook applies; the runner refuses to interrupt an active
+resident review. Do not use production memory as historical ground truth.
+
+`scripts/evaluate_reviews.py prepare --cases evaluations/cases.json --manifest
+<root>/manifest.json --directory <blind-dir>` produces variant-blinded packets,
+a separate key, and an unjudged annotation file. After source-backed adjudication,
+run the same command with `score` and omit `--manifest`. Known-issue recall,
+false positives, duplicates and before/after behavior are reported separately.
+Missing runs, unchecked coverage and unresolved judgments cannot pass assessment.
+No output auto-approves deployment; three frozen cases are not a broad quality claim.
 
 Both pipelines compose the same small prompt blocks at compile time:
 
