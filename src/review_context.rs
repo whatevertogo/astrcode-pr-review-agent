@@ -48,7 +48,7 @@ fn collect_review_context(
     let files = pull_request_files(&trigger.repo, trigger.pr.number)?;
     review_revision::validate_manifest(worktree, &revision,
         metadata["changedFiles"].as_u64().context("PR metadata missing changedFiles")?, &files)?;
-    assert_review_revision_current(trigger, &revision)?;
+    assert_review_revision_current(trigger, &revision, worktree)?;
     let (file_contexts, commentable_lines, non_commentable_files) =
         build_review_file_contexts(config, &files);
     let annotated = file_contexts
@@ -123,25 +123,11 @@ Non-inline-commentable files:
     })
 }
 
-fn assert_review_revision_current(trigger: &ReviewTrigger, revision: &ReviewRevision) -> Result<()> {
-    let metadata = gh_json(&["pr", "view", &trigger.pr.number.to_string(), "--repo", &trigger.repo,
-        "--json", "headRefOid,baseRefOid,baseRefName"])?;
-    anyhow::ensure!(revision.matches_metadata(&trigger.pr, &metadata),
-        "PR base/head changed during review; refusing to mix revisions or publish stale findings");
-    Ok(())
-}
-
-fn assert_review_publishable(trigger: &ReviewTrigger, revision: &ReviewRevision, worktree: &Path) -> Result<()> {
+fn assert_review_revision_current(trigger: &ReviewTrigger, revision: &ReviewRevision, worktree: &Path) -> Result<()> {
     let metadata: Value = gh_json(&["pr", "view", &trigger.pr.number.to_string(), "--repo", &trigger.repo,
         "--json", "headRefOid,baseRefOid,baseRefName"])?;
-    anyhow::ensure!(metadata["headRefOid"] == revision.head_sha && metadata["baseRefName"] == trigger.pr.base_ref_name,
-        "PR head or target branch changed during review; refusing to publish stale findings");
     // An unrelated commit on main does not invalidate an unchanged PR diff.
-    let current = ReviewRevision::resolve(worktree, &trigger.pr,
-        Some(metadata["baseRefOid"].as_str().context("missing current PR base SHA")?))?;
-    anyhow::ensure!(current.merge_base_sha == revision.merge_base_sha,
-        "PR merge base changed during review; refusing to publish findings for an obsolete diff");
-    Ok(())
+    revision.ensure_current_diff(worktree, &trigger.pr, &metadata)
 }
 
 fn pull_request_files(repo: &str, pr_number: u64) -> Result<Vec<PullRequestApiFile>> {

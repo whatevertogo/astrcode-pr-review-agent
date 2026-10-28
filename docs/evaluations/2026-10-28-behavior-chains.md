@@ -49,6 +49,30 @@ findings are included; observations remain separate from confirmed detections.
 Snapshot identity uses the original frozen input path and its pre-run digest,
 not per-binary reserialized outputs whose default fields can differ. The runner
 rejects input mutation, and the evaluator checks the recorded input again.
+Before/after pairs must use the same model identity. True positives must map to a
+validated issue in the corpus; independently discovered issues require a corpus
+update. Packets hide the variant and descriptive case label but retain the frozen
+revision needed to inspect source. This is variant blinding, not full source
+anonymization. Evidence and coverage are human attestations, not automatically
+verified facts; assessment completion is not deployment approval.
+
+## Publication and trust boundaries
+
+Coverage-first collection and publication accept unrelated base-tip advances only when the frozen
+merge base is unchanged. Inline writes (including fallback attempts) and the final
+summary after its model pass recheck the revision. GitHub offers no atomic
+compare-and-post transaction, so this narrows the race rather than claiming to
+eliminate it; inline reviews still carry the frozen commit ID.
+
+Current CLI snapshots also verify declared file count and local paths. PRs above
+the documented 3000-file API limit fail explicitly rather than reporting incomplete
+coverage as complete. Supporting those PRs with a local-manifest fallback remains
+outside this change.
+
+Behavior-chain strings and prior model outputs are explicitly untrusted data.
+They grant no tool permissions. This prompt boundary is not a security sandbox;
+the existing Git configuration isolation does not isolate credentials or network
+access, and those execution boundaries remain the host's responsibility.
 
 ## Verification
 

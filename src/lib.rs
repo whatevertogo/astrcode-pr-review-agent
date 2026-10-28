@@ -760,11 +760,30 @@ One concrete finding and one repo-history reminder.
             &Config::default(),
             &auto_trigger("owner/repo", 1),
             "fixture",
-            &validated
+            &validated,
+            || Ok(()),
         )
         .unwrap_err()
         .to_string()
         .contains("mandatory global review"));
+        let mut blocked_output = prior.clone();
+        blocked_output.global_review_complete = true;
+        let blocked = validate_review_output(&Config::default(), &blocked_output, &context);
+        assert!(!blocked.inline_findings.is_empty());
+        let checks = std::cell::Cell::new(0);
+        let publication = publish_structured_review(
+            &Config::default(),
+            &auto_trigger("owner/repo", 1),
+            "fixture",
+            &blocked,
+            || {
+                checks.set(checks.get() + 1);
+                anyhow::bail!("revision changed");
+            },
+        ).unwrap();
+        assert_eq!(checks.get(), 1 + blocked.inline_findings.len());
+        assert_eq!(publication.inline_comments_posted, 0);
+        assert!(publication.url.is_none());
         for invalid in [
             json!({"global_review_complete":false,"candidate_checks":raw["candidate_checks"],"observations":raw["observations"]}),
             json!({"global_review_complete":true,"candidate_checks":[raw["candidate_checks"][0]]}),

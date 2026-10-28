@@ -115,10 +115,16 @@ async fn review_trigger(
         }
         let mut validated = result?;
         suppress_repeated_findings(state, &trigger, &mut validated);
-        if let Some(revision) = &context.revision {
-            assert_review_publishable(&trigger, revision, &worktree)?;
-        }
-        let mut published = publish_structured_review(config, &trigger, &session_id, &validated)?;
+        let check_revision = || {
+            if let Some(revision) = &context.revision {
+                assert_review_revision_current(&trigger, revision, &worktree)?;
+            }
+            Ok(())
+        };
+        check_revision()?;
+        let mut published = publish_structured_review(
+            config, &trigger, &session_id, &validated, check_revision,
+        )?;
         post_final_structured_report(
             config,
             run_info,
@@ -126,6 +132,7 @@ async fn review_trigger(
             &session_id,
             &validated,
             &mut published,
+            check_revision,
         )
         .await?;
         update_pr_review_memory(state, &trigger, &session_id, Some(&validated), &published);
@@ -2880,6 +2887,7 @@ async fn post_final_structured_report(
     session_id: &str,
     validated: &ValidatedReview,
     published: &mut PublishedReview,
+    before_post: impl Fn() -> Result<()>,
 ) -> Result<()> {
     let report =
         match final_comment_report_pass(config, run_info, session_id, trigger, validated, published)
@@ -2894,6 +2902,7 @@ async fn post_final_structured_report(
         "final-comment-body.md",
         &body,
     );
+    before_post()?;
     let url = post_issue_comment(&trigger.repo, trigger.pr.number, &body)?;
     published.url = url.or_else(|| published.inline_review_url.clone());
     published.summary_body = body;
@@ -3331,6 +3340,7 @@ fn publish_structured_review(
     trigger: &ReviewTrigger,
     session_id: &str,
     validated: &ValidatedReview,
+    before_post: impl Fn() -> Result<()>,
 ) -> Result<PublishedReview> {
     anyhow::ensure!(validated.global_review_complete, "mandatory global review has not completed; refusing to publish review");
     let mut fallback_unplaced = validated.unplaced_findings.clone();
@@ -3352,7 +3362,10 @@ fn publish_structured_review(
         inline_findings,
         &mut fallback_unplaced,
         highest_risk.as_deref(),
-        |body, findings| post_pull_review(config, trigger, body, findings),
+        |body, findings| {
+            before_post()?;
+            post_pull_review(config, trigger, body, findings)
+        },
     );
     let inline_findings = publish.inline_findings;
 

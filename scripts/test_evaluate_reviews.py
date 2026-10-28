@@ -41,6 +41,7 @@ class EvaluationTest(unittest.TestCase):
             self.assertEqual(prepare(cases, manifest, directory)["missing"], [])
             packets = json.loads((directory / "packets.json").read_text())
             self.assertNotIn('"variant"', json.dumps(packets))
+            self.assertNotIn('"case"', json.dumps(packets))
             key = json.loads((directory / "key.json").read_text())
             judgments = json.loads((directory / "judgments.json").read_text())
             self.assertFalse(score(cases, packets, key, judgments)["assessment_complete"])
@@ -55,13 +56,36 @@ class EvaluationTest(unittest.TestCase):
             incomplete[0]["coverage"]["entries"]["a.rs"]["status"] = "Failed"
             self.assertFalse(score(cases, incomplete, key, judgments)["assessment_complete"])
             bad = copy.deepcopy(judgments)
-            before = next(p["id"] for p in packets if p["case"] == "before")
+            before = next(p["id"] for p in packets if key["mapping"][p["id"]]["case"] == "before")
             bad[before]["findings"][0]["evidence"] = ""
             with self.assertRaises(ValueError):
                 score(cases, packets, key, bad)
+            bad = copy.deepcopy(judgments)
+            bad[before]["findings"][0]["issue_ids"] = []
+            with self.assertRaises(ValueError):
+                score(cases, packets, key, bad)
+            regressed = copy.deepcopy(packets)
+            after = next(p for p in regressed if key["mapping"][p["id"]]["case"] == "after")
+            after["findings"] = [{"id": "F001", "finding": {"title": "fixed bug still reported"}}]
+            bad = copy.deepcopy(judgments)
+            bad[after["id"]]["findings"] = [{"id": "F001", "verdict": "false_positive",
+                "issue_ids": ["bug"], "evidence": "a.rs:10 now guards the failure"}]
+            result = score(cases, regressed, key, bad)
+            pair = next(p for p in result["fixed_issue_pairs"] if p["variant"] == key["mapping"][after["id"]]["variant"])
+            self.assertFalse(pair["found_before_absent_after"])
+            self.assertEqual(result["evidence_verification"], "human_attestation_only")
+            for record in manifest["runs"]:
+                if record["sample"].endswith("@" + cases["cases"][1]["head"]):
+                    path = Path(record["output_dir"]) / "result.json"
+                    original = json.loads(path.read_text())
+                    changed = copy.deepcopy(original)
+                    changed["model"] = {"name": "different"}
+                    path.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "before/after"):
+                prepare(cases, manifest, root / "different-models")
             snapshot = Path(manifest["runs"][0]["snapshot_path"])
             snapshot.write_text("{}")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "snapshot changed"):
                 prepare(cases, manifest, root / "tampered")
 
 

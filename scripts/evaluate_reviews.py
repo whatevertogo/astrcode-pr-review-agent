@@ -53,7 +53,7 @@ def prepare(cases, manifest, output, seed=0):
                 for finding in review.get(location, []):
                     findings.append({"id": f"F{len(findings) + 1:03}", "location": location, "finding": finding})
             report_path = directory / "baseline-model-report.md"
-            pair.append((variant, {"case": case["id"], "repo": case["repo"], "pr": case["pr"],
+            pair.append((variant, {"repo": case["repo"], "pr": case["pr"],
                 "head": case["head"], "findings": findings, "observations": review.get("observations", []),
                 "investigation_log": review.get("investigation_log", []),
                 "report": report_path.read_text() if report_path.exists() else "",
@@ -64,6 +64,11 @@ def prepare(cases, manifest, output, seed=0):
             packet["id"] = packet_id
             packets.append(packet)
             key[packet_id] = {"case": case["id"], "variant": variant}
+    for case in cases["cases"]:
+        before = identities.get(case.get("paired_with"))
+        after = identities.get(case["id"])
+        if before and after and before["model"] != after["model"]:
+            raise ValueError("cannot compare before/after fixes across different models")
     (output / "packets.json").write_text(json.dumps(packets, ensure_ascii=False, indent=2))
     (output / "key.json").write_text(json.dumps({"mapping": key, "missing": missing}, indent=2))
     judgments = {p["id"]: {"coverage_checked": False, "coverage_evidence": "", "findings": [
@@ -100,6 +105,8 @@ def score(cases, packets, key, judgments):
             if verdict == "true_positive" and labels & forbidden:
                 raise ValueError("a forbidden issue cannot count as a true positive")
             if verdict == "true_positive":
+                if not labels & expected:
+                    raise ValueError("a true positive needs a validated expected issue label; update the corpus first")
                 matched.update(labels & expected)
             forbidden_reported.update(labels & forbidden)
             counts[verdict] += 1
@@ -127,7 +134,8 @@ def score(cases, packets, key, judgments):
             paired.append({"case": case["id"], "variant": variant, "found_before_absent_after": passed})
     return {"assessments": rows, "fixed_issue_pairs": paired, "missing_runs": key["missing"],
             "assessment_complete": bool(rows) and not key["missing"] and all(r["assessment_complete"] for r in rows),
-            "note": "Human adjudication is required; this report never infers quality from comment counts or auto-approves deployment."}
+            "evidence_verification": "human_attestation_only",
+            "note": "Completion records human judgments and coverage attestations, not independently verified evidence. This report never infers quality from comment counts or auto-approves deployment."}
 
 
 def main():

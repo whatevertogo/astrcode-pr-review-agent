@@ -69,6 +69,30 @@ impl ReviewRevision {
             && metadata["baseRefOid"] == self.base_sha
             && metadata["baseRefName"] == pr.base_ref_name
     }
+
+    pub fn ensure_current_diff(
+        &self,
+        worktree: &Path,
+        pr: &PullRequest,
+        metadata: &Value,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            metadata["headRefOid"] == self.head_sha && metadata["baseRefName"] == pr.base_ref_name,
+            "PR head or target branch changed during review; refusing to publish stale findings"
+        );
+        let current = Self::resolve(
+            worktree,
+            pr,
+            Some(
+                metadata["baseRefOid"]
+                    .as_str()
+                    .context("missing current PR base SHA")?,
+            ),
+        )?;
+        anyhow::ensure!(current.merge_base_sha == self.merge_base_sha,
+            "PR merge base changed during review; refusing to publish findings for an obsolete diff");
+        Ok(())
+    }
 }
 
 pub(super) fn validate_manifest(
@@ -77,6 +101,8 @@ pub(super) fn validate_manifest(
     count: u64,
     files: &[PullRequestApiFile],
 ) -> Result<()> {
+    anyhow::ensure!(count <= 3_000,
+        "PR declares {count} files, exceeding GitHub's 3000-file pull-request API limit; refusing an incomplete review. Split this PR before retrying.");
     let paths = run_command(
         "git",
         &[
@@ -92,10 +118,16 @@ pub(super) fn validate_manifest(
     let local: BTreeSet<_> = paths.split('\0').filter(|s| !s.is_empty()).collect();
     let names: BTreeSet<_> = files.iter().map(|f| f.filename.as_str()).collect();
     // Compare touched paths independent of GitHub/local rename similarity thresholds.
-    let remote: BTreeSet<_> = files.iter().flat_map(|file| {
-        std::iter::once(file.filename.as_str()).chain(
-            file.previous_filename.as_deref().filter(|_| file.status.as_deref() == Some("renamed")))
-    }).collect();
+    let remote: BTreeSet<_> = files
+        .iter()
+        .flat_map(|file| {
+            std::iter::once(file.filename.as_str()).chain(
+                file.previous_filename
+                    .as_deref()
+                    .filter(|_| file.status.as_deref() == Some("renamed")),
+            )
+        })
+        .collect();
     anyhow::ensure!(files.len() == count as usize && names.len() == files.len() && remote == local,
         "PR file manifest incomplete or inconsistent: GitHub declared {count}, returned {}, local diff has {} files; missing={:?}; unexpected={:?}",
         files.len(), local.len(), local.difference(&remote).take(8).collect::<Vec<_>>(), remote.difference(&local).take(8).collect::<Vec<_>>());
@@ -183,11 +215,34 @@ mod tests {
             let mut metadata =
                 json!({"baseRefName": pr.base_ref_name, "baseRefOid": base, "headRefOid": head});
             assert!(revision.matches_metadata(&pr, &metadata));
+            let frozen = ReviewRevision {
+                base_sha: ancestor.clone(),
+                ..revision.clone()
+            };
+            assert!(!frozen.matches_metadata(&pr, &metadata));
+            frozen
+                .ensure_current_diff(root.path(), &pr, &metadata)
+                .unwrap();
+            metadata["baseRefOid"] = json!(head);
+            assert!(frozen
+                .ensure_current_diff(root.path(), &pr, &metadata)
+                .is_err());
+            metadata["baseRefOid"] = json!(base);
             metadata["baseRefName"] = json!("main");
             assert!(!revision.matches_metadata(&pr, &metadata));
+            assert!(frozen
+                .ensure_current_diff(root.path(), &pr, &metadata)
+                .is_err());
             metadata["baseRefName"] = json!(pr.base_ref_name);
             metadata["headRefOid"] = json!(ancestor);
             assert!(!revision.matches_metadata(&pr, &metadata));
+            assert!(frozen
+                .ensure_current_diff(root.path(), &pr, &metadata)
+                .is_err());
+            assert!(validate_manifest(root.path(), &revision, 3_001, &files)
+                .unwrap_err()
+                .to_string()
+                .contains("3000-file"));
         }
         pr.head_ref_oid = ancestor;
         assert!(ReviewRevision::resolve(root.path(), &pr, None).is_err());
@@ -224,7 +279,12 @@ mod tests {
         );
         let context = collect_review_context(&config, &trigger, &large_pr_worktree).unwrap();
         assert!(context.files.len() > 4);
-        assert!(!context.text.split("PR metadata JSON:").next().unwrap().contains("gh pr diff"));
+        assert!(!context
+            .text
+            .split("PR metadata JSON:")
+            .next()
+            .unwrap()
+            .contains("gh pr diff"));
         println!(
             "#1300 stacked base resolved; #1306 validated {} changed files",
             context.files.len()
