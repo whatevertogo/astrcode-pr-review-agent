@@ -120,9 +120,10 @@ explicit `--file` writes, or credential/network access; it is not a sandbox.
 
 The `coverage_first` orientation pass can propose behavior chains: changed files,
 related unchanged consumers, and concrete questions to investigate. The plugin
-validates those optional hints before grouping files; overlapping chains are
-merged, unassigned files keep the ordinary plan, and unsafe/over-budget hints do
-not invalidate findings. Large mixed groups keep a separate docs-consumer pass.
+validates those optional hints before grouping files; unusable paths are dropped
+individually, overlapping chains are merged, unassigned files keep the ordinary
+plan, and malformed or over-budget hints do not invalidate findings. Large mixed
+groups keep a separate docs-consumer pass.
 Every shard carries its chain's questions and related paths, not just a filename
 list. The final pass receives the accepted plan plus investigation evidence.
 `behavior-plan.json` records assignments and fallback reasons; a proposed path is

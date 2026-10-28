@@ -556,7 +556,7 @@ async fn run_coverage_first_review(
     {
         anyhow::bail!("all file review passes failed; review did not complete");
     }
-    let coverage = review_planning::coverage(context, &shards, &completed_parts);
+    let coverage = review_planning::coverage(context, shards, &completed_parts);
 
     let candidates = review_global::candidates(&merge_review_outputs(&outputs));
     let mut merged = {
@@ -814,14 +814,9 @@ fn orientation_review_prompt(
 {deterministic_checks}
 ```
 
-变更文件清单：
+变更文件清单与修订信息：
 ```text
 {manifest}
-```
-
-插件收集的 PR 上下文：
-```text
-{context}
 ```
 "#,
         AGENT_LINE = AGENT_LINE,
@@ -851,7 +846,6 @@ fn orientation_review_prompt(
         },
         deterministic_checks = format_verification_items(deterministic_checks),
         manifest = short_context_for_global_pass(context),
-        context = short_context_for_global_pass(context),
     )
 }
 

@@ -10,11 +10,13 @@ model rounds, a new system prompt, or a different P3 publication policy.
 Previously the plugin packed all shards before orientation ran. Orientation could
 describe cross-file behavior, but its discoveries could not influence assignment.
 Now orientation optionally emits `review_chain` JSON blocks (or `review_chains`
-in JSON output), which describe changed paths, related paths and checks. The
-deterministic planner validates hints, merges overlapping groups and reserves
-their prompt bytes before packing. Unassigned files are never omitted. If hints
-are malformed, too large, or worsen pass-budget coverage, the ordinary planner
-remains authoritative. Related paths are investigation leads, not reviewed files.
+in legacy JSON output), which describe changed paths, related paths and checks.
+The deterministic planner drops unusable changed/related paths individually,
+ignores chains left without an eligible changed path, merges overlapping groups
+and reserves their prompt bytes before packing. Unassigned files are never
+omitted. If hints are malformed, too large, or worsen pass-budget coverage, the
+ordinary planner remains authoritative. Related paths are investigation leads,
+not reviewed files.
 
 The earlier A/B experiment showed a real regression when all migration code and
 docs were merged into one long prompt. Consequently large mixed behavior groups

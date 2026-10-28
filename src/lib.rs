@@ -455,7 +455,7 @@ mod tests {
         assert!(prompt.contains("定向阶段"));
         assert!(prompt.contains("Repository PR/Issue relation reminders"));
         assert!(prompt.contains("PR #620 affects storage"));
-        assert!(prompt.contains("插件收集的 PR 上下文"));
+        assert!(prompt.contains("变更文件清单与修订信息"));
         assert!(prompt.contains("src/storage.rs"));
         assert!(!prompt.contains("GitHub command audit"));
         assert!(prompt.contains("标签输出协议"));

@@ -48,24 +48,22 @@ pub(super) fn plan(
     let mut used = 0;
     let allowance = config.review_context_max_bytes / 8;
     for hint in hints {
-        let size = serde_json::to_string(hint)?.len();
-        if hint.behavior.trim().is_empty()
-            || hint.changed_paths.is_empty()
-            || !hint.changed_paths.iter().all(|p| eligible.contains(p))
-            || !hint.related_paths.iter().all(|p| safe_relative_path(p))
-            || used + size > allowance
-        {
+        // Orientation sees generated and no-patch files in the manifest, so drop
+        // unusable paths individually instead of discarding the chain's checks.
+        let Some(hint) = normalize(hint, &eligible) else {
             notes.push(
-                "Ignored invalid or over-budget chain hint; its files remain in the manifest."
+                "Ignored a chain without behavior or an eligible changed path; its files remain in the manifest."
                     .into(),
             );
             continue;
+        };
+        let size = serde_json::to_string(&hint)?.len();
+        if used + size > allowance {
+            notes.push(
+                "Ignored an over-budget chain hint; its files remain in the manifest.".into(),
+            );
+            continue;
         }
-        let mut hint = hint.clone();
-        hint.changed_paths.sort();
-        hint.changed_paths.dedup();
-        hint.related_paths.sort();
-        hint.related_paths.dedup();
         used += size;
         chains.push(hint);
     }
@@ -139,6 +137,42 @@ pub(super) fn plan(
     })
 }
 
+fn normalize(hint: &ReviewChain, eligible: &BTreeSet<String>) -> Option<ReviewChain> {
+    let behavior = hint.behavior.trim();
+    let mut changed_paths = hint
+        .changed_paths
+        .iter()
+        .filter(|path| eligible.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    changed_paths.sort();
+    changed_paths.dedup();
+    if behavior.is_empty() || changed_paths.is_empty() {
+        return None;
+    }
+    let mut related_paths = hint
+        .related_paths
+        .iter()
+        .filter(|path| safe_relative_path(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    related_paths.sort();
+    related_paths.dedup();
+    let checks = hint
+        .checks
+        .iter()
+        .map(|check| check.trim())
+        .filter(|check| !check.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some(ReviewChain {
+        behavior: behavior.to_owned(),
+        changed_paths,
+        related_paths,
+        checks,
+    })
+}
+
 fn safe_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains(['\\', '\n', '\r'])
@@ -151,7 +185,7 @@ pub(super) fn render(chains: &[ReviewChain]) -> String {
     if chains.is_empty() {
         return String::new();
     }
-    format!("行为链调查线索（不是既定结论，也不是阅读边界）：\n```json\n{}\n```\n沿行为变化追入口、消费者、失败路径与断言；按需要读取相关未修改代码。先核实线索和反例，不把计划列出的风险直接当作 finding。\n",
+    format!("行为链调查线索（待核实，不是发现）：\n```json\n{}\n```\n沿链追入口、相关消费者和失败路径；先核实关联与反例，再决定是否形成结论。\n",
         serde_json::to_string(chains).unwrap_or_default())
 }
 
@@ -224,10 +258,17 @@ mod tests {
         let limited = super::plan(&config, &context, 100, &excessive, 2).unwrap();
         assert!(limited.notes.iter().any(|n| n.contains("pass budget")));
         assert!(limited.shards.len() <= 2);
-        let mut invalid = chain(&["src/cancel.rs"]);
-        invalid.related_paths = vec!["../outside.rs".into()];
-        let fallback = super::plan(&config, &context, 100, &[invalid], 20).unwrap();
-        assert!(fallback.chains.is_empty());
+        let mut unsafe_related = chain(&["src/cancel.rs"]);
+        unsafe_related.related_paths = vec!["../outside.rs".into(), "src/caller.rs".into()];
+        let filtered = super::plan(&config, &context, 100, &[unsafe_related], 20).unwrap();
+        assert_eq!(filtered.chains.len(), 1);
+        assert_eq!(filtered.chains[0].related_paths, ["src/caller.rs"]);
+
+        let mut mixed_paths = chain(&["src/cancel.rs", "not-in-diff.rs"]);
+        mixed_paths.changed_paths.push("Cargo.lock".into());
+        let partial = super::plan(&config, &context, 100, &[mixed_paths], 20).unwrap();
+        assert_eq!(partial.chains.len(), 1);
+        assert_eq!(partial.chains[0].changed_paths, ["src/cancel.rs"]);
         let mut oversized = chain(&["src/cancel.rs"]);
         oversized.behavior = "x".repeat(config.review_context_max_bytes);
         assert!(super::plan(&config, &context, 100, &[oversized], 20)
