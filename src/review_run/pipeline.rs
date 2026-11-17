@@ -18,6 +18,7 @@ pub(super) async fn analyze(
     host: &RunInfo,
     model: Value,
     input_key: String,
+    history: &str,
 ) -> Result<ReviewRunResult> {
     let worktree = checkout_pr(config, &snapshot.repo, &snapshot.pr)?;
     context::pin_base(&worktree, &snapshot.pr.base_ref_name, &snapshot.base_sha)?;
@@ -79,10 +80,10 @@ pub(super) async fn analyze(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
-            let mut prompt = format!("{}\n\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n适用仓库规则:\n{}\n已有验证:\n{}\n先前分片的结构化结论（用于定位和复用背景，最终问题仍须复核）:\n{}\n本轮文件（只检查这些变更，可读取相关消费者）:\n{}",
+            let mut prompt = format!("{}\n\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n适用仓库规则:\n{}\n已有验证:\n{}\n{}先前分片的结构化结论（用于定位和复用背景，最终问题仍须复核）:\n{}\n本轮文件（只检查这些变更，可读取相关消费者）:\n{}",
                 PROMPT_VERSION, snapshot.pr.title, snapshot.pr.body.as_deref().unwrap_or(""), snapshot.base_sha,
                 snapshot.pr.head_ref_oid, worktree.display(), instructions, format_verification_items(&snapshot.checks),
-                context::prior_conclusions(&outputs), shard.files.iter().map(|file| file.annotated_patch.as_str()).collect::<Vec<_>>().join("\n"));
+                history_block(history), context::prior_conclusions(&outputs), shard.files.iter().map(|file| file.annotated_patch.as_str()).collect::<Vec<_>>().join("\n"));
             if !snapshot.request.is_empty() {
                 prompt.push_str(&format!("\n本次审查要求：{}", snapshot.request));
             }
@@ -196,9 +197,9 @@ pub(super) async fn analyze(
                 .join("\n");
             // Pass conclusions, not their complete investigation transcripts or patches.
             let candidates = context::adjudication_context(&output, &outputs);
-            let mut prompt = format!("{}\n\n这是最终全局复核阶段。逐条验证候选的触发条件、影响、调用方约束、反例及本次 diff 因果关系；删除不成立或重复的问题。检查跨文件契约及调用者，可读取固定版本代码。返回完整的最终发现集合（不是增量）；只有实际复核成立的问题放 confirmed_findings。同时核对观察与剩余风险：删除已被反证、与最终结论冲突或重复的条目，其余保留完整证据和影响。返回最终 observations 与 residual_risk，不会自动追加分片旧观察。无证据的猜测不得升级。\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n规则:\n{}\n验证:\n{}\n文件清单:\n{}\n未完整检查:\n{:?}\n候选:\n{}",
+            let mut prompt = format!("{}\n\n这是最终全局复核阶段。逐条验证候选的触发条件、影响、调用方约束、反例及本次 diff 因果关系；删除不成立或重复的问题。检查跨文件契约及调用者，可读取固定版本代码。返回完整的最终发现集合（不是增量）；只有实际复核成立的问题放 confirmed_findings。同时核对观察与剩余风险：删除已被反证、与最终结论冲突或重复的条目，其余保留完整证据和影响。返回最终 observations 与 residual_risk，不会自动追加分片旧观察。无证据的猜测不得升级。\n\n若记忆或调查记录包含上轮意见、相关 PR 或历史设计决定，先用当前固定版本核实是否仍然成立；在 summary 或相关发现的 project_context 中说明已修复、仍有效或尚未核实，未核实只标为线索。合并、resolved、点赞或作者回复不证明问题已修复。summary 用一句话说明本次结论和仍需处理的点，不写内部流程或候选计数。\nPR: {}\nDescription:\n{}\nBase: {}\nHead: {}\n工作树: {}\n规则:\n{}\n验证:\n{}\n{}文件清单:\n{}\n未完整检查:\n{:?}\n候选:\n{}",
                 PROMPT_VERSION, snapshot.pr.title, snapshot.pr.body.as_deref().unwrap_or(""), snapshot.base_sha, snapshot.pr.head_ref_oid,
-                worktree.display(), instructions, format_verification_items(&snapshot.checks), short_context_for_global_pass(&snapshot.context), incomplete, candidates);
+                worktree.display(), instructions, format_verification_items(&snapshot.checks), history_block(history), short_context_for_global_pass(&snapshot.context), incomplete, candidates);
             if !snapshot.request.is_empty() {
                 prompt.push_str(&format!("\n本次审查要求：{}", snapshot.request));
             }
@@ -319,6 +320,17 @@ pub(super) async fn analyze(
         stages,
         publication: github::PublicationReceipt::default(),
     })
+}
+
+pub(super) fn history_block(history: &str) -> String {
+    if history.trim().is_empty() {
+        "相关审查记忆：本次未找到。\n".into()
+    } else {
+        format!(
+            "相关审查记忆（只作线索；先用当前固定版本核实，未核实的历史不作为发现。若包含上轮意见或相关 PR，先核对当前代码；未复核不等于已修复，合并、resolved 或点赞不代替证据）：\n{}\n",
+            history.trim()
+        )
+    }
 }
 
 fn fatal(error: &anyhow::Error) -> bool {
@@ -547,7 +559,7 @@ async fn baseline(
             posted_findings: Vec::new(),
         };
         let report =
-            final_comment_report_pass(config, host, &session, &trigger, &review, &published)
+            final_comment_report_pass(config, host, &session, &trigger, &review, &published, "")
                 .await?;
         fs::write(options.output.join("baseline-model-report.md"), report)?;
         anyhow::ensure!(

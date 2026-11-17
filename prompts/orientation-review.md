@@ -12,6 +12,8 @@
 
 `changed_paths` 只填清单中 kind 为 code、docs 或 oversized 的路径，不带反引号、行号或说明；generated 与 no_patch 文件只能写进 `related_paths`。`related_paths` 用仓库相对路径，不要绝对路径、`..` 或反斜杠，只列真正需要打开的路径。`behavior` 一句话，`checks` 至多 3–5 条；所有链合计受请求预算限制，超出的链会被丢弃。链是待核实线索，不是发现，也不算已审覆盖。已进入 `checks` 的疑点不要重复写进 observation。
 
+核对注入的上轮意见和相关 PR/Issue 线索。先用当前固定版本确认代码、讨论和状态，再把已修复、仍有效或尚未核实的结论及依据写入 `investigation_log`；有相关 PR 时保留真实链接并说明关联。合并、resolved、点赞或作者回复不证明意见已修复，未核实的历史不能直接生成 finding，也不要为凑格式罗列链接。
+
 最多留下 5 条含代码位置的可复用事实或明确待核对的前提；事实写入 investigation_log，待核实前提写入 observation。不要重复完整文件清单或 PR 描述，不因改动量大而推断风险高。
 
 除非现有证据已满足候选证据要求并能准确定位，否则不产出 finding。未完整检查文件时不声明 files_reviewed。不自行发布评论。

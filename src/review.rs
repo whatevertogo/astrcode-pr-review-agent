@@ -45,7 +45,14 @@ async fn review_trigger(
     let worktree = checkout_pr(config, &trigger.repo, &trigger.pr)?;
     let is_review_task = trigger_requests_review(&trigger);
     let mut memory = if is_review_task {
-        review_memory::relevant(config, &trigger)?
+        [
+            review_memory::relevant(config, &trigger)?,
+            review_memory::structured(&trigger, state),
+        ]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
     } else {
         relevant_memory(config, &trigger.repo, trigger.pr.number)?
     };
@@ -132,6 +139,7 @@ async fn review_trigger(
             &session_id,
             &validated,
             &mut published,
+            &memory,
             check_revision,
         )
         .await?;
@@ -2258,7 +2266,7 @@ Head SHA：`{sha}`
 }
 
 fn post_issue_comment(repo: &str, pr_number: u64, body: &str) -> Result<Option<String>> {
-    let payload = json!({ "body": body });
+    let payload = json!({ "body": review_comments::publication_body(body) });
     let mut file = tempfile::NamedTempFile::new()?;
     serde_json::to_writer(file.as_file_mut(), &payload)?;
     file.as_file_mut().flush()?;
@@ -2880,6 +2888,7 @@ Previous response:
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn post_final_structured_report(
     config: &Config,
     run_info: &RunInfo,
@@ -2887,15 +2896,17 @@ async fn post_final_structured_report(
     session_id: &str,
     validated: &ValidatedReview,
     published: &mut PublishedReview,
+    memory: &str,
     before_post: impl Fn() -> Result<()>,
 ) -> Result<()> {
-    let report =
-        match final_comment_report_pass(config, run_info, session_id, trigger, validated, published)
-            .await
-        {
-            Ok(report) => report,
-            Err(error) => fallback_final_report(validated, published, Some(&format!("{error:#}"))),
-        };
+    let report = match final_comment_report_pass(
+        config, run_info, session_id, trigger, validated, published, memory,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => fallback_final_report(validated, published, Some(&format!("{error:#}"))),
+    };
     let body = final_review_comment_body(config, trigger, session_id, validated, published, &report);
     write_debug_artifact(
         validated.debug_dir.as_deref(),
@@ -2916,8 +2927,9 @@ async fn final_comment_report_pass(
     trigger: &ReviewTrigger,
     validated: &ValidatedReview,
     published: &PublishedReview,
+    memory: &str,
 ) -> Result<String> {
-    let prompt = final_comment_report_prompt(trigger, validated, published);
+    let prompt = final_comment_report_prompt(trigger, validated, published, memory);
     write_debug_artifact(
         validated.debug_dir.as_deref(),
         "final-report-prompt.md",
@@ -2949,6 +2961,7 @@ fn final_comment_report_prompt(
     trigger: &ReviewTrigger,
     validated: &ValidatedReview,
     published: &PublishedReview,
+    memory: &str,
 ) -> String {
     let (posted, unposted): (Vec<_>, Vec<_>) =
         validated.inline_findings.iter().partition(|finding| {
@@ -3042,17 +3055,19 @@ fn final_comment_report_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let investigation = if validated.investigation_log.is_empty() {
+    let mut investigation = if validated.investigation_log.is_empty() {
         "无".into()
     } else {
         validated
             .investigation_log
             .iter()
-            .take(12)
             .map(|item| format!("- {}", one_line(item)))
             .collect::<Vec<_>>()
             .join("\n")
     };
+    if truncate_text(&mut investigation, 48_000) {
+        investigation.push_str("\n[调查记录过长，部分未提供给报告整理；不得声称已完整核对历史。]");
+    }
     let coverage = validated
         .coverage
         .as_ref()
@@ -3076,6 +3091,11 @@ fn final_comment_report_prompt(
         (None, Some(url)) => format!("GitHub 审查链接 {url}"),
         (None, None) => "未创建行内审查对象".into(),
     };
+    let history = if memory.trim().is_empty() {
+        "本次未提供上轮意见或相关 PR 线索。"
+    } else {
+        memory.trim()
+    };
     format!(
         r#"{AGENT_LINE}
 
@@ -3090,7 +3110,11 @@ fn final_comment_report_prompt(
 - 首段直接给出与已审范围相符的结论；未审、失败或未执行验证时说明限制。没有问题时写“在已审范围内未发现需要修复的问题”，不批准合并。
 - 已有行评只列优先级、简短问题和位置，避免复制整条行评。待核实建议与确定问题分开；不能把“没发出行评”等同于“没有问题”。
 - 仅总结的问题保留触发条件、影响、依据与最小修复方向。未确认的前提必须明确标注，不提高置信度，不虚构命令、代码事实或验证结果。
-- 详细证据、覆盖、检查结果和剩余风险放入有内容的 <details>；没有内容就省略，不填“无”占位。
+- 有上轮意见时，按实际核对结果说明已修复、仍有效或尚未核实；没有再次报告不等于已修复。不凭旧记忆宣布当前代码有缺陷，也不因合并、resolved 或点赞认定意见已消除。
+- 保留调查记录中已核实的历史决定和相关 PR 链接，解释它与当前改动的具体关系；未经核实的关联明确标为线索，不为凑格式罗列链接。没有历史核对或相关 PR 时省略对应部分。
+- 面向维护者说清实际行为、影响和下一步。正文不堆 Confirmed、候选处置、证据链等内部术语；专有名词首次出现时用短句解释。验证来源和结论口径分开：源码推断、本机测试、CI 和真实设备不能混写。
+- 结论措辞只表示审查判断，不表示已获批准或可以合并；不编造批准人、测试结果或验证来源。
+- 详细证据、覆盖明细、检查命令和候选清单放入有内容的 <details>；会影响结论的剩余风险、未审范围和验证限制留在正文。没有内容就省略，不填“无”占位。
 - 不强制生成“合并评估”“做了什么”等重复章节，不另造行动清单。通常几段或几条列表即可，关键证据不能省掉。
 - 不包含 marker、身份行、会话或 SHA；插件会添加。不要让用户再运行 GitHub API 命令。
 
@@ -3128,7 +3152,12 @@ fn final_comment_report_prompt(
 {observations}
 ```
 
-调查记录：
+上轮意见与相关 PR 线索（只作线索；先用固定版本核实，未核实不得写成事实）：
+```text
+{history}
+```
+
+调查记录（只采用其中已核实的事实）：
 ```text
 {investigation}
 ```
@@ -3176,6 +3205,7 @@ fn final_comment_report_prompt(
         } else {
             &observations
         },
+        history = history,
         investigation = investigation,
         verification = verification,
         residual = residual,
@@ -3242,13 +3272,10 @@ fn final_review_comment_body(
         config.comment_marker,
         &sha[..sha.len().min(12)],
     );
-    body.push_str(&review_global::summary(validated));
-    if let Some(coverage) = &validated.coverage {
-        let skipped = coverage.entries.values().filter(|e| e.status == CoverageStatus::SkippedGenerated).count();
-        body.push_str(&format!("\n文件阶段覆盖：{}/{}；生成文件跳过 {}。全局复核不会将未审文件计为已审。\n", coverage.reviewed_count(), coverage.total_count(), skipped));
-        review_comments::fold(&mut body, "程序记录的文件覆盖", &coverage.summary_lines());
+    if review_comments::is_partial(validated) {
+        body.push_str("本次审查未覆盖全部文件或验证未全部完成，以下结论仅适用于已审范围。\n\n");
     }
-    body.push_str(&format!("\n{}\n", report.trim()));
+    body.push_str(&format!("{}\n", report.trim()));
     if let Some(url) = &published.inline_review_url {
         body.push_str(&format!(
             "\n[查看 {} 条行评]({url})\n",
@@ -3260,6 +3287,29 @@ fn final_review_comment_body(
             "\n{} 个问题未能行内定位或发布，请查看报告中的证据与限制。\n",
             published.unplaced_findings_count
         ));
+    }
+    let mut scope = String::new();
+    if let Some(coverage) = &validated.coverage {
+        let skipped = coverage
+            .entries
+            .values()
+            .filter(|entry| entry.status == CoverageStatus::SkippedGenerated)
+            .count();
+        scope.push_str(&format!(
+            "- 已审查文件：{}/{}；生成文件跳过 {}。未审文件不计入已审。\n",
+            coverage.reviewed_count(),
+            coverage.total_count(),
+            skipped
+        ));
+    }
+    let review_record = review_global::summary(validated);
+    if !review_record.trim().is_empty() {
+        scope.push_str(review_record.trim());
+        scope.push('\n');
+    }
+    review_comments::fold(&mut body, "审查范围与复核记录", &scope);
+    if let Some(coverage) = &validated.coverage {
+        review_comments::fold(&mut body, "文件覆盖明细", &coverage.summary_lines());
     }
     review_comments::fold(
         &mut body,
@@ -3331,7 +3381,12 @@ fn fallback_final_report(
             published.unplaced_findings_count
         ));
     }
-    review_comments::fold(&mut body, "剩余风险", &residual);
+    let residual = residual.trim();
+    if !residual.is_empty() {
+        body.push_str("\n仍需确认：\n");
+        body.push_str(residual);
+        body.push('\n');
+    }
     body
 }
 

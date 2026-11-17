@@ -145,11 +145,31 @@ An indivisible over-budget line fails planning visibly rather than pretending it
 was reviewed. Source whitespace is preserved.
 
 Review memory contains bounded current-PR history and up to three prior reviews
-mentioning an exact changed path, not a dump of recent repository reviews. The
-full memory index remains available for targeted tool searches. Existing repo/path
-instructions, the four review lenses, configured P3 publication and the persistent
-PR session remain unchanged. The final global pass explicitly checks each candidate's
-trigger, attribution and counterevidence before the plugin publishes comments.
+mentioning an exact changed path, not a dump of recent repository reviews. Recall
+also reads the findings already persisted in `State.pr_review_memory`
+(`posted_findings`/`summary_findings`), matching their stored paths against the
+current PR's changed files. Existing records therefore remain useful without a
+retained session, and the persistence format is unchanged. The prompt block for a
+related PR includes its title and URL when available; the summary text is not asked
+to carry a truncated path list. Both pipelines inject the bounded memory into their
+file/global prompts; the quality-first path previously wrote memory without reading
+it. The full memory index remains available for targeted tool searches. Existing
+repo/path instructions, the four review lenses, configured P3 publication and the
+persistent PR session remain unchanged. The final global pass explicitly checks each
+candidate's trigger, attribution and counterevidence before the plugin publishes
+comments.
+
+History is always a lead, not current evidence. Prompts require checking the frozen
+revision before treating an earlier comment or related PR as resolved; merged,
+resolved or liked status is not proof. The final report leads with the structured
+conclusion, then preserves the review stage's summary paragraphs and links, including
+verified history feedback. Coverage/verification limits and residual risks stay
+visible in the body; missing coverage is reported as unrecorded rather than assumed
+complete, and failed checks are distinguished from checks that never ran. Candidate
+accounting, coverage details and command output move to folds. See
+`docs/review-report-examples.md` for fictional examples of first-review, re-review,
+decision-needed and verification-limited reports; they are expression examples, not
+measured results or protocol fixtures.
 
 Design references (adapted, not copied wholesale): PR-Agent's
 [full-diff-first packing](https://github.com/The-PR-Agent/pr-agent/blob/main/pr_agent/algo/pr_processing.py),

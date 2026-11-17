@@ -108,6 +108,26 @@ fn successful_shards_freeze_context_but_reject_mismatched_or_damaged_receipts() 
 }
 
 #[test]
+fn history_block_marks_memory_as_unverified_leads() {
+    let block = pipeline::history_block("## Related PR #8 https://github.test/pr/8");
+    assert!(block.contains("只作线索"));
+    assert!(block.contains("未核实的历史不作为发现"));
+    assert!(block.contains("Related PR #8"));
+    assert!(pipeline::history_block("").contains("本次未找到"));
+}
+
+#[test]
+fn quality_validation_keeps_investigation_evidence_for_the_report() {
+    let context = fixture("@@ -1 +1 @@\n-old\n+new\n");
+    let output = ReviewBotOutput {
+        investigation_log: vec!["src/a.rs:12 上轮意见已被调用方防护消除".into()],
+        ..ReviewBotOutput::default()
+    };
+    let result = validation::validate(&Config::default(), &output, &context);
+    assert_eq!(result.investigation_log, output.investigation_log);
+}
+
+#[test]
 fn shared_conclusions_are_bounded_deduplicated_and_never_cut_an_entry() {
     let candidate = finding("Existing candidate", "RIGHT", 2, "P2", "high");
     let outputs = vec![
@@ -461,18 +481,25 @@ fn artifacts_round_trip_atomically_and_cache_key_covers_every_input() {
     };
     let config = Config::default();
     let model = json!({"model":"same"});
-    let key = input_key(&snapshot, &config, &model).unwrap();
+    let key = input_key(&snapshot, &config, &model, "").unwrap();
+    assert_eq!(key, input_key(&snapshot, &config, &model, "").unwrap());
+    let with_history = input_key(&snapshot, &config, &model, "PR #8: unresolved").unwrap();
+    assert_ne!(key, with_history);
+    assert_ne!(
+        with_history,
+        input_key(&snapshot, &config, &model, "PR #8: fixed with evidence").unwrap()
+    );
     let mut changed = snapshot.clone();
     changed.base_sha.push('x');
-    assert_ne!(key, input_key(&changed, &config, &model).unwrap());
+    assert_ne!(key, input_key(&changed, &config, &model, "").unwrap());
     changed.base_sha = snapshot.base_sha.clone();
     changed.pr.head_ref_oid.push('x');
-    assert_ne!(key, input_key(&changed, &config, &model).unwrap());
+    assert_ne!(key, input_key(&changed, &config, &model, "").unwrap());
     changed.pr.head_ref_oid = snapshot.pr.head_ref_oid.clone();
     changed
         .instructions
         .insert("AGENTS.md".into(), "changed policy".into());
-    assert_ne!(key, input_key(&changed, &config, &model).unwrap());
+    assert_ne!(key, input_key(&changed, &config, &model, "").unwrap());
     assert_ne!(
         key,
         input_key(
@@ -481,12 +508,13 @@ fn artifacts_round_trip_atomically_and_cache_key_covers_every_input() {
                 max_review_passes_per_pr: 2,
                 ..config
             },
-            &model
+            &model,
+            ""
         )
         .unwrap()
     );
     assert_ne!(
         key,
-        input_key(&snapshot, &Config::default(), &json!({"model":"other"})).unwrap()
+        input_key(&snapshot, &Config::default(), &json!({"model":"other"}), "").unwrap()
     );
 }

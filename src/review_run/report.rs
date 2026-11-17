@@ -8,6 +8,56 @@ pub(super) fn conclusion(review: &ValidatedReview) -> String {
     review_comments::conclusion(review)
 }
 
+/// Keep every limit that changes how the conclusion should be read, and
+/// distinguish failed checks from checks that never ran.
+fn limits(result: &ReviewRunResult) -> Option<String> {
+    let review = &result.review;
+    let mut reasons = Vec::new();
+    if !review.global_review_complete {
+        reasons.push("全局复核未完成，以下为已收集结果，不代表最终结论。".to_string());
+    }
+    match &review.coverage {
+        None => reasons.push("未记录文件覆盖范围，尚不能确认全部文件已审完。".into()),
+        Some(coverage)
+            if coverage.entries.values().any(|entry| {
+                !matches!(
+                    entry.status,
+                    CoverageStatus::Reviewed | CoverageStatus::SkippedGenerated
+                )
+            }) =>
+        {
+            reasons.push("仍有文件未完整审查，以下结论仅覆盖已审文件。".into());
+        }
+        Some(_) => {}
+    }
+    if review.verification.is_empty() {
+        reasons.push("未记录实际执行的检查，不能据此确认已验证。".into());
+    } else {
+        let failed = review
+            .verification
+            .iter()
+            .filter(|item| item.status.as_deref() == Some("failed"))
+            .count();
+        let unexecuted = review
+            .verification
+            .iter()
+            .filter(|item| !matches!(item.status.as_deref(), Some("passed" | "failed")))
+            .count();
+        if failed > 0 {
+            reasons.push(format!("有 {failed} 项检查失败，不能将验证视为通过。"));
+        }
+        if unexecuted > 0 {
+            reasons.push(format!(
+                "有 {unexecuted} 项验证未执行或状态未知，结论未覆盖这些检查。"
+            ));
+        }
+    }
+    if reasons.is_empty() && result.status != "complete" {
+        reasons.push("本次审查仍有未完成的部分，结论仅覆盖已核实范围。".into());
+    }
+    (!reasons.is_empty()).then(|| reasons.join("\n"))
+}
+
 use review_comments::fold;
 
 pub(super) fn render(result: &ReviewRunResult) -> String {
@@ -20,26 +70,12 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
         },
         &result.head_sha[..result.head_sha.len().min(12)]
     );
-    body.push_str(&review_global::summary(&result.review));
-    if let Some(coverage) = &result.review.coverage {
-        body.push_str(&format!(
-            "文件审查：{} / {}。验证状态：{}。\n\n",
-            coverage.reviewed_count(),
-            coverage.total_count(),
-            if result
-                .review
-                .verification
-                .iter()
-                .all(|item| item.status.as_deref() == Some("passed"))
-                && !result.review.verification.is_empty()
-            {
-                "已执行的检查通过"
-            } else {
-                "尚未全部完成，请展开验证详情"
-            }
-        ));
+    let conclusion = conclusion(&result.review);
+    body.push_str(&conclusion);
+    if let Some(limit) = limits(result) {
+        body.push_str(&limit);
+        body.push_str("\n\n");
     }
-    body.push_str(&conclusion(&result.review));
     if !result.review.inline_findings.is_empty() {
         body.push('\n');
         for finding in &result.review.inline_findings {
@@ -51,6 +87,25 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
     }
     if result.publication.error.is_some() {
         body.push_str("\n行评发布未完全确认；已保留结果，重试前将核对 GitHub 回执。\n");
+    }
+    if let Some(summary) = result
+        .review
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty() && *summary != conclusion.trim())
+    {
+        // Preserve the review stage's own paragraphs and links; the structured
+        // conclusion and findings above remain independently visible.
+        body.push('\n');
+        body.push_str(summary);
+        body.push_str("\n\n");
+    }
+    if !result.review.residual_risk.is_empty() {
+        body.push_str("\n仍需确认：\n");
+        for risk in &result.review.residual_risk {
+            body.push_str(&format!("- {}\n", risk.trim()));
+        }
     }
     let details = result
         .review
@@ -81,7 +136,7 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
     fold(&mut body, "无法行内定位的问题", &unplaced);
     fold(
         &mut body,
-        "覆盖范围",
+        "审查范围",
         &result
             .review
             .coverage
@@ -89,6 +144,19 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
             .map(ReviewCoverage::summary_lines)
             .unwrap_or_else(|| "未记录覆盖范围".into()),
     );
+    fold(
+        &mut body,
+        "复核记录",
+        review_global::summary(&result.review).trim(),
+    );
+    let investigation = result
+        .review
+        .investigation_log
+        .iter()
+        .map(|item| review_comments::list_item(item))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fold(&mut body, "审查中核对的事实", &investigation);
     fold(
         &mut body,
         "已执行验证",
@@ -124,16 +192,5 @@ pub(super) fn render(result: &ReviewRunResult) -> String {
     if !result.stages.is_empty() {
         fold(&mut body, "模型用量与耗时", &usage);
     }
-    fold(
-        &mut body,
-        "剩余风险",
-        &result
-            .review
-            .residual_risk
-            .iter()
-            .map(|risk| format!("- {risk}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
     body
 }

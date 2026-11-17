@@ -161,8 +161,11 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
     let revision = ReviewRevision::resolve(&worktree, &pr, Some(&base_sha))?;
     if options.head.is_none() {
         review_revision::validate_manifest(
-            &worktree, &revision,
-            identity["changedFiles"].as_u64().context("PR metadata missing changedFiles")?,
+            &worktree,
+            &revision,
+            identity["changedFiles"]
+                .as_u64()
+                .context("PR metadata missing changedFiles")?,
             &files,
         )?;
     }

@@ -223,3 +223,22 @@ pub(crate) fn conclusion(review: &ValidatedReview) -> String {
         "在已审范围内未发现需要修复的高置信度 P0–P2 问题。\n".into()
     }
 }
+
+/// Keep the publication valid without slicing Markdown structures. Full results
+/// remain in the review artifacts; an oversized visible lead is not a conclusion.
+pub(crate) fn publication_body(body: &str) -> String {
+    if body.len() <= 58_000 {
+        return body.to_owned();
+    }
+    let lead = body.split("<details>").next().unwrap_or("");
+    let mut compact = if lead.len() <= 56_000 {
+        lead.to_owned()
+    } else {
+        body.lines().take(3).collect::<Vec<_>>().join("\n")
+    };
+    if compact.len() > 56_000 {
+        compact = DEFAULT_MARKER.to_owned();
+    }
+    compact.push_str("\n\n报告超过发布长度上限，部分正文或详细记录未在此展示；本条不能代替完整审查结论。请结合已发布行评与完整审查产物核对。\n");
+    compact
+}
