@@ -148,9 +148,14 @@ pub(super) fn model_identity(run_info: &RunInfo) -> Result<Value> {
     )
 }
 
-fn input_key(snapshot: &ReviewSnapshot, config: &Config, model: &Value) -> Result<String> {
+fn input_key(
+    snapshot: &ReviewSnapshot,
+    config: &Config,
+    model: &Value,
+    history: &str,
+) -> Result<String> {
     let mut input = json!({
-        "version":2,"global_contract":review_global::CONTRACT,"snapshot":snapshot,"config":config,"model":model,
+        "version":3,"history_digest":digest(history.as_bytes()),"global_contract":review_global::CONTRACT,"snapshot":snapshot,"config":config,"model":model,
         "prompts":pipeline::PROMPT_VERSION,"protocol":PR_REVIEW_BOT_PROMPT,
         "file":FILE_REVIEW_PROMPT,"global":GLOBAL_REVIEW_PROMPT,
         "orientation":ORIENTATION_REVIEW_PROMPT,"few_shots":PR_REVIEW_FEW_SHOTS_PROMPT,
@@ -207,7 +212,15 @@ pub async fn review_cli(args: Vec<String>) -> Result<()> {
     // Unlike the poller, an experiment never starts or restarts a service.
     let run_info: RunInfo = read(&astrcode_dir()?.join("run.json"))?;
     let model = model_identity(&run_info)?;
-    let key = input_key(&snapshot, &config, &model)?;
+    let trigger = context::trigger(&snapshot);
+    let history = crate::review_memory::relevant(&config, &trigger).unwrap_or_else(|error| {
+        eprintln!(
+            "review memory unavailable for {}#{}: {error:#}",
+            snapshot.repo, snapshot.pr.number
+        );
+        String::new()
+    });
+    let key = input_key(&snapshot, &config, &model, &history)?;
     // Legacy stage labels alone are insufficient cache keys. Its evaluation state
     // also lives beneath the full input digest, never the resident agent's directory.
     let run_data_dir = options.output.join("agent-data").join(&key);
@@ -230,14 +243,6 @@ pub async fn review_cli(args: Vec<String>) -> Result<()> {
         let mut result = match cached {
             Some(result) if result.schema_version==RESULT_SCHEMA_VERSION && result.input_key == key && !result.retryable_failures => result,
             _ => {
-                let trigger = context::trigger(&snapshot);
-                let history = crate::review_memory::relevant(&config, &trigger).unwrap_or_else(|error| {
-                    eprintln!(
-                        "review memory unavailable for {}#{}: {error:#}",
-                        snapshot.repo, snapshot.pr.number
-                    );
-                    String::new()
-                });
                 RUN_DATA_DIR.scope(run_data_dir,pipeline::analyze(&options, &config, &snapshot, &run_info, model, key, &history)).await?
             },
         };
@@ -318,7 +323,22 @@ pub(super) async fn poll_review(
     snapshot.request = trigger_instruction(trigger);
     save(&output.join("snapshot.json"), &snapshot)?;
     let model = model_identity(host)?;
-    let key = input_key(&snapshot, &isolated, &model)?;
+    let history_trigger = context::trigger(&snapshot);
+    let relevant =
+        crate::review_memory::relevant(&isolated, &history_trigger).unwrap_or_else(|error| {
+            eprintln!(
+                "review memory unavailable for {}#{}: {error:#}",
+                snapshot.repo, snapshot.pr.number
+            );
+            String::new()
+        });
+    let structured = crate::review_memory::structured(&history_trigger, state);
+    let history = [relevant, structured]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let key = input_key(&snapshot, &isolated, &model, &history)?;
     let path = output.join("result.json");
     let cached: Option<ReviewRunResult> = if path.exists() {
         Some(read(&path)?)
@@ -333,24 +353,7 @@ pub(super) async fn poll_review(
         {
             result
         }
-        _ => {
-            let history_trigger = context::trigger(&snapshot);
-            let relevant = crate::review_memory::relevant(&isolated, &history_trigger)
-                .unwrap_or_else(|error| {
-                    eprintln!(
-                        "review memory unavailable for {}#{}: {error:#}",
-                        snapshot.repo, snapshot.pr.number
-                    );
-                    String::new()
-                });
-            let structured = crate::review_memory::structured(&history_trigger, state);
-            let history = [relevant, structured]
-                .into_iter()
-                .filter(|part| !part.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            pipeline::analyze(&options, &isolated, &snapshot, host, model, key, &history).await?
-        }
+        _ => pipeline::analyze(&options, &isolated, &snapshot, host, model, key, &history).await?,
     };
     save(&path, &result)?;
     github::publish(&snapshot, &mut result, &output)?;

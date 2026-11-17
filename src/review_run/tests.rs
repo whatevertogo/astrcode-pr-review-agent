@@ -481,18 +481,25 @@ fn artifacts_round_trip_atomically_and_cache_key_covers_every_input() {
     };
     let config = Config::default();
     let model = json!({"model":"same"});
-    let key = input_key(&snapshot, &config, &model).unwrap();
+    let key = input_key(&snapshot, &config, &model, "").unwrap();
+    assert_eq!(key, input_key(&snapshot, &config, &model, "").unwrap());
+    let with_history = input_key(&snapshot, &config, &model, "PR #8: unresolved").unwrap();
+    assert_ne!(key, with_history);
+    assert_ne!(
+        with_history,
+        input_key(&snapshot, &config, &model, "PR #8: fixed with evidence").unwrap()
+    );
     let mut changed = snapshot.clone();
     changed.base_sha.push('x');
-    assert_ne!(key, input_key(&changed, &config, &model).unwrap());
+    assert_ne!(key, input_key(&changed, &config, &model, "").unwrap());
     changed.base_sha = snapshot.base_sha.clone();
     changed.pr.head_ref_oid.push('x');
-    assert_ne!(key, input_key(&changed, &config, &model).unwrap());
+    assert_ne!(key, input_key(&changed, &config, &model, "").unwrap());
     changed.pr.head_ref_oid = snapshot.pr.head_ref_oid.clone();
     changed
         .instructions
         .insert("AGENTS.md".into(), "changed policy".into());
-    assert_ne!(key, input_key(&changed, &config, &model).unwrap());
+    assert_ne!(key, input_key(&changed, &config, &model, "").unwrap());
     assert_ne!(
         key,
         input_key(
@@ -501,12 +508,13 @@ fn artifacts_round_trip_atomically_and_cache_key_covers_every_input() {
                 max_review_passes_per_pr: 2,
                 ..config
             },
-            &model
+            &model,
+            ""
         )
         .unwrap()
     );
     assert_ne!(
         key,
-        input_key(&snapshot, &Config::default(), &json!({"model":"other"})).unwrap()
+        input_key(&snapshot, &Config::default(), &json!({"model":"other"}), "").unwrap()
     );
 }
