@@ -46,7 +46,9 @@ pub(super) fn validate(
         summary_findings: Vec::new(),
         unplaced_findings: Vec::new(),
         observations: output.observations.clone(),
-        investigation_log: Vec::new(),
+        // Keep source-backed notes so the rendered report and later memory can
+        // show what was actually verified instead of inventing history anew.
+        investigation_log: output.investigation_log.clone(),
         verification: output.verification.clone(),
         residual_risk: output.residual_risk.clone(),
         summary: output.summary.clone(),

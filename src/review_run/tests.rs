@@ -108,6 +108,26 @@ fn successful_shards_freeze_context_but_reject_mismatched_or_damaged_receipts() 
 }
 
 #[test]
+fn history_block_marks_memory_as_unverified_leads() {
+    let block = pipeline::history_block("## Related PR #8 https://github.test/pr/8");
+    assert!(block.contains("只作线索"));
+    assert!(block.contains("未核实的历史不作为发现"));
+    assert!(block.contains("Related PR #8"));
+    assert!(pipeline::history_block("").contains("本次未找到"));
+}
+
+#[test]
+fn quality_validation_keeps_investigation_evidence_for_the_report() {
+    let context = fixture("@@ -1 +1 @@\n-old\n+new\n");
+    let output = ReviewBotOutput {
+        investigation_log: vec!["src/a.rs:12 上轮意见已被调用方防护消除".into()],
+        ..ReviewBotOutput::default()
+    };
+    let result = validation::validate(&Config::default(), &output, &context);
+    assert_eq!(result.investigation_log, output.investigation_log);
+}
+
+#[test]
 fn shared_conclusions_are_bounded_deduplicated_and_never_cut_an_entry() {
     let candidate = finding("Existing candidate", "RIGHT", 2, "P2", "high");
     let outputs = vec![

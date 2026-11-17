@@ -16,4 +16,5 @@
 - 仓库 instructions 是审查政策，应该保留；插件协议是控制面，不能被仓库 instructions 覆盖。
 - 模型可以自由用 `gh`、`git`、`rg` 读上下文，但不能自己发 GitHub 评论。
 - 可发布问题必须写在 `<finding ...>...</finding>` 中；低置信度或非 action item 写 `<observation>`。
-- few-shot 要短，只教判断，不塞大段真实代码。
+- few-shot 要短，只教判断，不塞大段真实代码。报告语气和结构示例见 `docs/review-report-examples.md`，不要把这些长示例塞进每次请求的 few-shot。
+- 历史意见、相关 PR 和既有记忆只作线索；合并、resolved、点赞不证明问题已修复。

@@ -229,7 +229,17 @@ pub async fn review_cli(args: Vec<String>) -> Result<()> {
     let outcome = async {
         let mut result = match cached {
             Some(result) if result.schema_version==RESULT_SCHEMA_VERSION && result.input_key == key && !result.retryable_failures => result,
-            _ => RUN_DATA_DIR.scope(run_data_dir,pipeline::analyze(&options, &config, &snapshot, &run_info, model, key)).await?,
+            _ => {
+                let trigger = context::trigger(&snapshot);
+                let history = crate::review_memory::relevant(&config, &trigger).unwrap_or_else(|error| {
+                    eprintln!(
+                        "review memory unavailable for {}#{}: {error:#}",
+                        snapshot.repo, snapshot.pr.number
+                    );
+                    String::new()
+                });
+                RUN_DATA_DIR.scope(run_data_dir,pipeline::analyze(&options, &config, &snapshot, &run_info, model, key, &history)).await?
+            },
         };
         save(&result_path, &result)?;
         fs::write(options.output.join("report.md"), report::render(&result))?;
@@ -323,7 +333,24 @@ pub(super) async fn poll_review(
         {
             result
         }
-        _ => pipeline::analyze(&options, &isolated, &snapshot, host, model, key).await?,
+        _ => {
+            let history_trigger = context::trigger(&snapshot);
+            let relevant = crate::review_memory::relevant(&isolated, &history_trigger)
+                .unwrap_or_else(|error| {
+                    eprintln!(
+                        "review memory unavailable for {}#{}: {error:#}",
+                        snapshot.repo, snapshot.pr.number
+                    );
+                    String::new()
+                });
+            let structured = crate::review_memory::structured(&history_trigger, state);
+            let history = [relevant, structured]
+                .into_iter()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            pipeline::analyze(&options, &isolated, &snapshot, host, model, key, &history).await?
+        }
     };
     save(&path, &result)?;
     github::publish(&snapshot, &mut result, &output)?;

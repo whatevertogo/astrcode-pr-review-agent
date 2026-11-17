@@ -34,8 +34,18 @@ pub(super) fn relevant(config: &Config, trigger: &ReviewTrigger) -> Result<Strin
             }
             let mut summary = record.summary;
             truncate_text(&mut summary, 1_800);
+            let title = if record.pr_title.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" 「{}」", record.pr_title.trim())
+            };
+            let url = if record.pr_url.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {}", record.pr_url.trim())
+            };
             parts.push(format!(
-                "## Related PR #{} at {} (historical evidence, not a current finding)\n{}",
+                "## Related PR #{}{title}{url} at {} (historical evidence, not a current finding)\n{}",
                 record.pr_number, record.head_sha, summary
             ));
             if seen.len() == 3 {
@@ -44,6 +54,80 @@ pub(super) fn relevant(config: &Config, trigger: &ReviewTrigger) -> Result<Strin
         }
     }
     Ok(parts.join("\n\n"))
+}
+
+/// Recall structured findings already persisted in `State`, including records
+/// written before changed paths were appended to review summaries. No session
+/// is required, and the persistence format is unchanged.
+pub(super) fn structured(trigger: &ReviewTrigger, state: &State) -> String {
+    let current_key = pr_key(&trigger.repo, trigger.pr.number);
+    let prefix = format!("{}#", trigger.repo);
+    let mut related = state
+        .pr_review_memory
+        .iter()
+        .filter(|(key, memory)| {
+            key.starts_with(&prefix)
+                && (*key == &current_key
+                    || memory
+                        .posted_findings
+                        .values()
+                        .chain(memory.summary_findings.values())
+                        .any(|finding| {
+                            finding.path.as_ref().is_some_and(|path| {
+                                trigger.pr.files.iter().any(|file| &file.path == path)
+                            })
+                        }))
+        })
+        .collect::<Vec<_>>();
+    related.sort_by_key(|(key, memory)| {
+        (
+            *key != &current_key,
+            std::cmp::Reverse(memory.last_reviewed_at),
+        )
+    });
+    let mut parts = Vec::new();
+    for (key, memory) in related.into_iter().take(4) {
+        let current = key == &current_key;
+        let number = key.strip_prefix(&prefix).unwrap_or("");
+        let mut seen = BTreeSet::new();
+        let mut findings = memory
+            .posted_findings
+            .iter()
+            .chain(memory.summary_findings.iter())
+            .filter(|(fingerprint, finding)| {
+                seen.insert(fingerprint.as_str())
+                    && (current
+                        || finding.path.as_ref().is_some_and(|path| {
+                            trigger.pr.files.iter().any(|file| &file.path == path)
+                        }))
+            })
+            .map(|(_, finding)| finding)
+            .collect::<Vec<_>>();
+        findings.sort_by_key(|finding| std::cmp::Reverse(finding.posted_at));
+        let entries = findings
+            .into_iter()
+            .take(12)
+            .map(|finding| {
+                format!(
+                    "- {} {} `{}`:{} (历史提交 {}, 保存状态 {})",
+                    finding.priority,
+                    finding.title,
+                    finding.path.as_deref().unwrap_or("未定位"),
+                    finding.line.unwrap_or(0),
+                    finding.head_sha,
+                    finding.status
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !entries.is_empty() {
+            parts.push(format!(
+                "## 历史意见 https://github.com/{}/pull/{}\n以下是历史记录，须对照当前代码与讨论核实已修复、仍有效或尚未核实，保存状态不代表当前状态。\n{}",
+                trigger.repo, number, entries
+            ));
+        }
+    }
+    parts.join("\n\n")
 }
 
 fn recent_lines(text: &str, budget: usize) -> String {
