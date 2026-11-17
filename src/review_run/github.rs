@@ -77,11 +77,7 @@ pub(super) fn update_summary(
         "{SUMMARY_MARKER}\n{DEFAULT_MARKER}\n\n**{status}** · `{}`\n\n{lifecycle_note}{content}",
         snapshot.pr.head_ref_oid
     );
-    // Bound GitHub payload size without cutting through Markdown/HTML structures.
-    anyhow::ensure!(
-        body.len() <= 60_000,
-        "summary exceeds GitHub size budget; full result retained locally"
-    );
+    let body = review_comments::publication_body(&body);
     let comments = pages(&format!("{endpoint}?per_page=100"))?;
     let reply = if let Some(existing) = owned_with_marker(&comments, owner, SUMMARY_MARKER) {
         let id = existing["id"].as_u64().context("summary missing id")?;

@@ -2266,7 +2266,7 @@ Head SHA：`{sha}`
 }
 
 fn post_issue_comment(repo: &str, pr_number: u64, body: &str) -> Result<Option<String>> {
-    let payload = json!({ "body": body });
+    let payload = json!({ "body": review_comments::publication_body(body) });
     let mut file = tempfile::NamedTempFile::new()?;
     serde_json::to_writer(file.as_file_mut(), &payload)?;
     file.as_file_mut().flush()?;
@@ -3055,7 +3055,7 @@ fn final_comment_report_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let investigation = if validated.investigation_log.is_empty() {
+    let mut investigation = if validated.investigation_log.is_empty() {
         "无".into()
     } else {
         validated
@@ -3065,6 +3065,9 @@ fn final_comment_report_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    if truncate_text(&mut investigation, 48_000) {
+        investigation.push_str("\n[调查记录过长，部分未提供给报告整理；不得声称已完整核对历史。]");
+    }
     let coverage = validated
         .coverage
         .as_ref()
