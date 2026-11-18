@@ -534,7 +534,7 @@ async fn run_coverage_first_review(
             context,
             deterministic_checks: &deterministic_checks,
         };
-        let instructions = instruction_context_for_shard(config, worktree, shard)
+        let instructions = instruction_context_for_shard(config, worktree, shard, context.revision.as_ref())
             .unwrap_or_else(|error| format!("instructions unavailable: {error:#}"));
         let prompt = file_review_prompt(&prompt_context, memory_paths, shard, &instructions);
         anyhow::ensure!(prompt.len() <= config.review_context_max_bytes,
@@ -852,6 +852,7 @@ fn orientation_review_prompt(
                 .iter()
                 .map(|file| file.path.clone())
                 .collect::<Vec<_>>(),
+            context.revision.as_ref(),
         )
         .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
         memory = if memory.trim().is_empty() {
@@ -1077,6 +1078,7 @@ fn global_review_prompt(
                 .iter()
                 .map(|file| file.path.clone())
                 .collect::<Vec<_>>(),
+            prompt.context.revision.as_ref(),
         )
         .unwrap_or_else(|error| format!("instructions unavailable: {error:#}")),
         deterministic_checks = format_verification_items(prompt.deterministic_checks),
@@ -1188,21 +1190,26 @@ fn instruction_context_for_shard(
     config: &Config,
     worktree: &Path,
     shard: &ReviewShard,
+    revision: Option<&ReviewRevision>,
 ) -> Result<String> {
     let paths = shard
         .files
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    instruction_context_for_paths(config, worktree, &paths)
+    instruction_context_for_paths(config, worktree, &paths, revision)
 }
 
 fn instruction_context_for_paths(
     config: &Config,
     worktree: &Path,
     changed_paths: &[String],
+    revision: Option<&ReviewRevision>,
 ) -> Result<String> {
     let mut parts = Vec::new();
+    if let Some(revision) = revision {
+        parts.extend(root_review_rule(worktree, &revision.base_sha)?);
+    }
     for relative in [
         ".github/astrcode-review.md",
         ".github/copilot-instructions.md",
@@ -1250,6 +1257,21 @@ fn instruction_context_for_paths(
     };
     truncate_text(&mut text, config.instruction_context_max_bytes.max(1));
     Ok(text)
+}
+
+// Select from the frozen base tree so a PR cannot replace its own review policy.
+fn root_review_rule(worktree: &Path, base: &str) -> Result<Option<String>> {
+    let tree = run_command("git", &["ls-tree", base, "--", "REVIEW.md", "review.md"], Some(worktree))?;
+    for name in ["REVIEW.md", "review.md"] {
+        if let Some(entry) = tree.lines().find(|line| line.split_once('\t').is_some_and(|(_, path)| path == name)) {
+            if !entry.starts_with("100644 blob ") && !entry.starts_with("100755 blob ") { continue; }
+            let text = run_command("git", &["show", &format!("{base}:{name}")], Some(worktree))?;
+            if !text.trim().is_empty() {
+                return Ok(Some(format!("## `{name}` (base `{base}`)\n{}", text.trim())));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn push_instruction_file(parts: &mut Vec<String>, worktree: &Path, relative: &str) -> Result<()> {
