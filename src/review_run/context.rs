@@ -210,11 +210,12 @@ pub(super) fn prepare(options: &Options, config: &Config) -> Result<ReviewSnapsh
     } else {
         Vec::new()
     };
+    let root_rule = root_review_rule(&worktree, &base_sha)?;
     let mut instructions = BTreeMap::new();
     for file in &file_contexts {
         instructions.insert(
             file.path.clone(),
-            path_instructions(config, &worktree, &file.path)?,
+            path_instructions(config, &worktree, &file.path, root_rule.as_deref())?,
         );
     }
     let text = format!(
@@ -271,8 +272,13 @@ pub(super) fn pin_base(worktree: &Path, branch: &str, sha: &str) -> Result<()> {
     Ok(())
 }
 
-fn path_instructions(config: &Config, worktree: &Path, path: &str) -> Result<String> {
-    let mut parts = Vec::new();
+fn path_instructions(
+    config: &Config,
+    worktree: &Path,
+    path: &str,
+    root_rule: Option<&str>,
+) -> Result<String> {
+    let mut parts: Vec<String> = root_rule.into_iter().map(str::to_owned).collect();
     for file in [
         "AGENTS.md",
         ".github/astrcode-review.md",

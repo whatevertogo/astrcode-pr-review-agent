@@ -427,3 +427,5 @@ cargo check
 ```
 
 The crate depends on `astrcode-extension-sdk` from the Astrcodey repository.
+
+Both review pipelines load the root review policy from the frozen base commit. A nonempty regular `REVIEW.md` takes precedence over `review.md`. Changes to the policy apply after they reach the base branch.

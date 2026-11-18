@@ -2272,6 +2272,41 @@ One concrete finding and one repo-history reminder.
     }
 
     #[test]
+    fn root_rules_come_from_base_even_when_head_changes_the_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| run_command("git", args, Some(root)).unwrap();
+        git(&["init", "-q"]);
+        let commit = || {
+            git(&[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                "rules",
+            ])
+        };
+        fs::write(root.join("review.md"), "old rule").unwrap();
+        git(&["add", "review.md"]);
+        commit();
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["mv", "review.md", "renamed.md"]);
+        fs::write(root.join("REVIEW.md"), "new rule").unwrap();
+        git(&["add", "REVIEW.md"]);
+        commit();
+        assert!(root_review_rule(root, base.trim())
+            .unwrap()
+            .unwrap()
+            .ends_with("old rule"));
+        assert!(root_review_rule(root, "HEAD")
+            .unwrap()
+            .unwrap()
+            .ends_with("new rule"));
+    }
+
+    #[test]
     fn instruction_context_loads_repo_and_matching_path_rules() {
         let tmp = tempfile::tempdir().unwrap();
         let config = Config {
@@ -2292,7 +2327,7 @@ One concrete finding and one repo-history reminder.
         .unwrap();
 
         let text =
-            instruction_context_for_paths(&config, tmp.path(), &[String::from("src/lib.rs")])
+            instruction_context_for_paths(&config, tmp.path(), &[String::from("src/lib.rs")], None)
                 .unwrap();
 
         assert!(text.contains("Prefer maintainable code."));
